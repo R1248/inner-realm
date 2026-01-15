@@ -2,11 +2,40 @@ import React, { useMemo } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import type { Tile } from "../lib/types";
 
-const BASE_MIN = 60;
-const MAX_LEVEL = 3;
+type Props = {
+  open: boolean;
+  tile: Tile | null;
+  light: number;
 
-function totalRequiredForLevel(level: number) {
-  return (BASE_MIN * (level * (level + 1))) / 2;
+  boostCost: number;
+  boostMinutes: number;
+
+  isTarget: boolean;
+
+  onClose: () => void;
+  onBoost: () => Promise<void> | void;
+  onLogHere: () => void;
+  onToggleTarget: () => Promise<void> | void;
+};
+
+const MAX_LEVEL = 3;
+const BASE_MIN = 60;
+
+const REGION_MULT: Record<Tile["region"], number> = {
+  wastelands: 0.75,
+  river: 1.0,
+  citadel: 1.5,
+};
+
+function segmentNeed(level: number, region: Tile["region"]) {
+  const mult = REGION_MULT[region] ?? 1;
+  return Math.max(1, Math.round(BASE_MIN * (level + 1) * mult));
+}
+
+function totalRequiredForLevel(level: number, region: Tile["region"]) {
+  let total = 0;
+  for (let i = 0; i < level; i++) total += segmentNeed(i, region);
+  return total;
 }
 
 function regionLabel(region: Tile["region"]) {
@@ -15,104 +44,111 @@ function regionLabel(region: Tile["region"]) {
   return "Wastelands";
 }
 
-export function TileSheet(props: {
-  open: boolean;
-  tile: Tile | null;
-  light: number;
-  boostCost: number;
-  boostMinutes: number;
-
-  isTarget: boolean;
-
-  onClose: () => void;
-  onBoost: () => void;
-  onLogHere: () => void;
-  onToggleTarget: () => void;
-}) {
-  const { open, tile } = props;
-
+export function TileSheet({
+  open,
+  tile,
+  light,
+  boostCost,
+  boostMinutes,
+  isTarget,
+  onClose,
+  onBoost,
+  onLogHere,
+  onToggleTarget,
+}: Props) {
   const info = useMemo(() => {
     if (!tile) return null;
 
     const level = Math.max(0, Math.min(MAX_LEVEL, tile.level));
-    const start = totalRequiredForLevel(level);
-    const end = totalRequiredForLevel(level + 1);
-    const within = Math.max(0, tile.progress - start);
-    const need = Math.max(1, end - start);
-    const ratio = level >= MAX_LEVEL ? 1 : Math.max(0, Math.min(1, within / need));
+    const isMax = level >= MAX_LEVEL;
 
-    return { level, start, end, within, need, ratio };
+    const start = totalRequiredForLevel(level, tile.region);
+    const need = isMax ? 0 : segmentNeed(level, tile.region);
+    const within = isMax ? 0 : Math.max(0, tile.progress - start);
+    const ratio = isMax ? 1 : Math.max(0, Math.min(1, within / Math.max(1, need)));
+
+    const nextTotal = isMax ? start : start + need;
+
+    return { level, isMax, start, need, within, ratio, nextTotal };
   }, [tile]);
 
-  if (!tile || !info) return null;
-
-  const isMax = tile.level >= MAX_LEVEL;
-  const canBoost = !isMax && props.light >= props.boostCost;
-
   return (
-    <Modal visible={open} transparent animationType="fade" onRequestClose={props.onClose}>
-      <Pressable style={styles.backdrop} onPress={props.onClose} />
+    <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.backdrop} onPress={onClose} />
 
       <View style={styles.sheet}>
         <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.title}>
-              {regionLabel(tile.region)} • ({tile.row}, {tile.col})
-            </Text>
-            <Text style={styles.subtitle}>
-              Level {tile.level}/{MAX_LEVEL} • Invested {tile.progress}m
-            </Text>
-          </View>
-
-          {props.isTarget ? (
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>TARGET</Text>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={styles.progressWrap}>
-          <View style={styles.progressBg}>
-            <View style={[styles.progressFill, { width: `${Math.round(info.ratio * 100)}%` }]} />
-          </View>
-          <Text style={styles.progressText}>
-            {isMax ? "Maxed" : `Next level: ${info.within}/${info.need} min`}
+          <Text style={styles.title}>
+            {tile ? `${regionLabel(tile.region)} (${tile.row}, ${tile.col})` : "Tile"}
           </Text>
-        </View>
 
-        <View style={styles.actions}>
-          <Pressable
-            onPress={props.onBoost}
-            disabled={!canBoost}
-            style={[styles.btn, styles.btnPrimary, !canBoost && styles.btnDisabled]}
-          >
-            <Text style={styles.btnPrimaryText}>
-              Boost +{props.boostMinutes}m ({props.boostCost} Light)
+          <View style={[styles.badge, isTarget ? styles.badgeOn : styles.badgeOff]}>
+            <Text style={[styles.badgeText, isTarget ? styles.badgeTextOn : styles.badgeTextOff]}>
+              {isTarget ? "🎯 Target" : "Tile"}
             </Text>
-          </Pressable>
-
-          <Pressable onPress={props.onLogHere} style={[styles.btn, styles.btnGhost]}>
-            <Text style={styles.btnGhostText}>Log session into this tile</Text>
-          </Pressable>
-
-          <Pressable onPress={props.onToggleTarget} style={[styles.btn, styles.btnGhost]}>
-            <Text style={styles.btnGhostText}>{props.isTarget ? "Unset target" : "Set as target"}</Text>
-          </Pressable>
-
-          <Pressable onPress={props.onClose} style={[styles.btn, styles.btnClose]}>
-            <Text style={styles.btnCloseText}>Close</Text>
-          </Pressable>
+          </View>
         </View>
+
+        {tile && info ? (
+          <>
+            <View style={styles.statRow}>
+              <View style={styles.stat}>
+                <Text style={styles.statLabel}>Level</Text>
+                <Text style={styles.statValue}>{tile.level}</Text>
+              </View>
+              <View style={styles.stat}>
+                <Text style={styles.statLabel}>Invested</Text>
+                <Text style={styles.statValue}>{tile.progress}m</Text>
+              </View>
+              <View style={styles.stat}>
+                <Text style={styles.statLabel}>Next</Text>
+                <Text style={styles.statValue}>
+                  {info.isMax ? "MAX" : `${info.within}/${info.need}m`}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.barTrack}>
+              <View style={[styles.barFill, { width: `${Math.round(info.ratio * 100)}%` }]} />
+            </View>
+
+            <Text style={styles.hint}>
+              Thresholds are cumulative. Region difficulty modifies minutes: Wastelands (cheaper) / River / Citadel (harder).
+            </Text>
+
+            <View style={styles.actions}>
+              <Pressable style={styles.btnPrimary} onPress={onLogHere}>
+                <Text style={styles.btnPrimaryText}>Log into this tile</Text>
+              </Pressable>
+
+              <Pressable style={styles.btnSecondary} onPress={onToggleTarget}>
+                <Text style={styles.btnSecondaryText}>{isTarget ? "Clear target" : "Set as target"}</Text>
+              </Pressable>
+
+              <Pressable
+                style={[
+                  styles.btnSecondary,
+                  light < boostCost ? { opacity: 0.45 } : null,
+                ]}
+                disabled={light < boostCost}
+                onPress={onBoost}
+              >
+                <Text style={styles.btnSecondaryText}>
+                  Boost +{boostMinutes}m ({boostCost} Light)
+                </Text>
+              </Pressable>
+            </View>
+          </>
+        ) : (
+          <Text style={{ color: "#9ca3af" }}>No tile selected.</Text>
+        )}
       </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.6)",
-  },
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)" },
   sheet: {
     position: "absolute",
     left: 16,
@@ -124,47 +160,57 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     padding: 14,
   },
-  headerRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  title: { color: "white", fontSize: 16, fontWeight: "900" },
-  subtitle: { color: "#9ca3af", marginTop: 6, fontSize: 12 },
 
-  badge: {
-    backgroundColor: "#0b1220",
-    borderColor: "#111827",
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  badgeText: { color: "#e5e7eb", fontWeight: "900", fontSize: 11 },
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  title: { color: "white", fontWeight: "900", fontSize: 14 },
 
-  progressWrap: { marginTop: 12 },
-  progressBg: {
-    height: 10,
-    borderRadius: 999,
+  badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
+  badgeOn: { backgroundColor: "#fff", borderColor: "#fff" },
+  badgeOff: { backgroundColor: "#020305", borderColor: "#111827" },
+  badgeText: { fontWeight: "900", fontSize: 12 },
+  badgeTextOn: { color: "#000" },
+  badgeTextOff: { color: "#e5e7eb" },
+
+  statRow: { flexDirection: "row", gap: 10, marginTop: 12 },
+  stat: {
+    flex: 1,
     backgroundColor: "#020305",
     borderColor: "#111827",
     borderWidth: 1,
+    borderRadius: 16,
+    padding: 10,
+  },
+  statLabel: { color: "#9ca3af", fontSize: 11, fontWeight: "800" },
+  statValue: { color: "white", fontSize: 14, fontWeight: "900", marginTop: 6 },
+
+  barTrack: {
+    marginTop: 10,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.10)",
     overflow: "hidden",
   },
-  progressFill: { height: "100%", backgroundColor: "#38bdf8" },
-  progressText: { marginTop: 8, color: "#6b7280", fontSize: 12 },
+  barFill: { height: "100%", borderRadius: 999, backgroundColor: "rgba(255,255,255,0.85)" },
+
+  hint: { marginTop: 10, color: "#6b7280", fontSize: 12, lineHeight: 16 },
 
   actions: { marginTop: 12, gap: 10 },
 
-  btn: {
-    borderRadius: 16,
+  btnPrimary: {
+    backgroundColor: "#fff",
+    borderRadius: 18,
     paddingVertical: 12,
-    paddingHorizontal: 12,
     alignItems: "center",
   },
-  btnPrimary: { backgroundColor: "#fff" },
-  btnPrimaryText: { color: "#000", fontWeight: "900" },
-  btnDisabled: { opacity: 0.35 },
+  btnPrimaryText: { color: "#000", fontWeight: "900", fontSize: 14 },
 
-  btnGhost: { backgroundColor: "#020305", borderColor: "#111827", borderWidth: 1 },
-  btnGhostText: { color: "#e5e7eb", fontWeight: "900" },
-
-  btnClose: { backgroundColor: "transparent" },
-  btnCloseText: { color: "#9ca3af", fontWeight: "900" },
+  btnSecondary: {
+    backgroundColor: "#020305",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  btnSecondaryText: { color: "#e5e7eb", fontWeight: "900", fontSize: 14 },
 });
