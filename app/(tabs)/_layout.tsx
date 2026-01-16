@@ -29,6 +29,7 @@ export default function TabLayout() {
           ),
         }}
       />
+      {__DEV__ && <Tabs.Screen name="devtools" options={{ title: "Dev" }} />}
     </Tabs>
   );
 }

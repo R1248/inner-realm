@@ -21,10 +21,7 @@ export const TileGrid = React.memo(function TileGrid(props: {
   return (
     <>
       {Array.from({ length: rows }).map((_, r) => (
-        <View
-          key={r}
-          style={{ flexDirection: "row", marginBottom: r === rows - 1 ? 0 : gap }}
-        >
+        <View key={r} style={{ flexDirection: "row", marginBottom: r === rows - 1 ? 0 : gap }}>
           {Array.from({ length: cols }).map((_, c) => {
             const t = tileMap.get(`${r}-${c}`);
             if (!t) {
@@ -42,6 +39,7 @@ export const TileGrid = React.memo(function TileGrid(props: {
 
             const { border, fill } = regionColors(t.region);
             const isTarget = t.id === targetTileId;
+            const isLocked = t.locked === 1;
 
             const level = Math.max(0, Math.min(MAX_LEVEL, t.level));
             const ratio = tileProgressRatio(t);
@@ -56,13 +54,15 @@ export const TileGrid = React.memo(function TileGrid(props: {
                     width: tileSize,
                     height: tileSize,
                     marginRight: c === cols - 1 ? 0 : gap,
-                    borderColor: border,
+                    borderColor: isLocked ? "#374151" : border,
                     backgroundColor: levelBg(t.region, t.level),
                     borderWidth: isTarget ? 2 : 1,
+                    opacity: isLocked ? 0.35 : 1,
                   },
                 ]}
               >
                 {isTarget ? <View style={styles.targetDot} /> : null}
+                {isLocked ? <Text style={styles.lockText}>🔒</Text> : null}
 
                 {level > 0 ? <Text style={styles.tileText}>{level}</Text> : <View style={styles.tileDot} />}
 
@@ -102,6 +102,14 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: "#fff",
     opacity: 0.9,
+  },
+
+  lockText: {
+    position: "absolute",
+    top: 4,
+    left: 6,
+    fontSize: 10,
+    opacity: 0.95,
   },
 
   tileBarTrack: {

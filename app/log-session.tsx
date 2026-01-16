@@ -2,7 +2,8 @@ import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { AppHeader } from "../components/AppHeader";
-import type { ActivityType, Tile } from "../lib/types";
+import type { ActivityType } from "../lib/types";
+import { allowedActivitiesForRegion, regionLabel } from "../lib/world/regions";
 import { useGameStore } from "../store/useGameStore";
 
 const activities: { key: ActivityType; label: string; hint: string }[] = [
@@ -12,18 +13,6 @@ const activities: { key: ActivityType; label: string; hint: string }[] = [
   { key: "sport", label: "Sport", hint: "Clear the Wastelands" },
   { key: "habit", label: "Habit", hint: "Stabilize the Realm" },
 ];
-
-function regionLabel(region: Tile["region"]) {
-  if (region === "citadel") return "Citadel";
-  if (region === "river") return "River";
-  return "Wastelands";
-}
-
-function allowedActivitiesForRegion(region: Tile["region"]): ActivityType[] {
-  if (region === "citadel") return ["work", "study"];
-  if (region === "river") return ["meditation"];
-  return ["sport", "habit"];
-}
 
 export default function LogSession() {
   const params = useLocalSearchParams<{ tileId?: string }>();
@@ -82,14 +71,14 @@ export default function LogSession() {
             <Text style={styles.lockValue}>
               {lockedTile
                 ? `${regionLabel(lockedTile.region)} (${lockedTile.row}, ${lockedTile.col})`
-                : "Auto-pick by activity region"}
+                : "Auto-pick by activity"}
             </Text>
             <Text style={styles.lockHint}>
               {forcedTile
-                ? "This is a one-time lock (log into this tile). Activities are restricted to its region."
+                ? "This is a one-time lock (log into this tile). Activities are restricted by region rules."
                 : targetTile
-                ? "Target tile lock is active. Activities are restricted to its region."
-                : "No tile lock. Your minutes go into a tile based on activity region."}
+                ? "Target tile lock is active. Activities are restricted by region rules."
+                : "No tile lock. Your minutes go into a tile that allows the selected activity."}
             </Text>
           </View>
 

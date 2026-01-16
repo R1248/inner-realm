@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import type { Tile } from "../../lib/types";
+import { INNER_REALM_LAYOUT } from "../../lib/world/innerRealmLayout";
 import { TileGrid } from "./TileGrid";
 
 type EdgeX = "left" | "right";
@@ -31,16 +32,13 @@ export function RealmMap(props: {
   const gap = props.gap ?? 6;
   const edgeInset = props.edgeInset ?? 2;
 
-  // derive rows/cols from tiles
+  // derive rows/cols from the canonical layout (NOT from persisted tiles)
+  // This keeps the map size stable even if the DB still contains legacy extra rows/cols.
   const { rows, cols } = useMemo(() => {
-    let maxR = 0;
-    let maxC = 0;
-    for (const t of props.tiles) {
-      if (t.row > maxR) maxR = t.row;
-      if (t.col > maxC) maxC = t.col;
-    }
-    return { rows: maxR + 1, cols: maxC + 1 };
-  }, [props.tiles]);
+    const rows = Number(INNER_REALM_LAYOUT.length);
+    const cols = Number(INNER_REALM_LAYOUT.reduce((m, line) => Math.max(m, line.length), 0));
+    return { rows, cols };
+  }, []);
 
   const tileMap = useMemo(() => {
     const m = new Map<string, Tile>();

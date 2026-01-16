@@ -1,29 +1,6 @@
-import * as SQLite from "expo-sqlite";
-
-const DB_NAME = "inner_realm.db";
-
-// New expo-sqlite API (SDK 50+): openDatabaseAsync + execAsync/runAsync/getAllAsync
-let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
-
-async function getDb() {
-  if (!dbPromise) dbPromise = SQLite.openDatabaseAsync(DB_NAME);
-  return dbPromise;
-}
-
-export async function exec(sql: string): Promise<void> {
-  const db = await getDb();
-  await db.execAsync(sql);
-}
-
-export async function run(sql: string, params: SQLite.SQLiteBindValue[] = []): Promise<void> {
-  const db = await getDb();
-  await db.runAsync(sql, params);
-}
-
-export async function all<T = any>(sql: string, params: SQLite.SQLiteBindValue[] = []): Promise<T[]> {
-  const db = await getDb();
-  return (await db.getAllAsync(sql, params)) as T[];
-}
+import { all, exec, run } from "./dbCore";
+import { seedInnerRealmIfEmpty } from "./world/seedInnerRealm";
+import { syncInnerRealmToLayout } from "./world/syncInnerRealm";
 
 export async function initDb(): Promise<void> {
   await exec(`
@@ -40,7 +17,9 @@ export async function initDb(): Promise<void> {
       col INTEGER NOT NULL,
       region TEXT NOT NULL,
       level INTEGER NOT NULL,
-      progress INTEGER NOT NULL DEFAULT 0
+      progress INTEGER NOT NULL DEFAULT 0,
+      feature TEXT,
+      locked INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS sessions (
@@ -55,6 +34,8 @@ export async function initDb(): Promise<void> {
   // 1) MIGRATIONS first (so columns exist on older DBs)
   try { await run(`ALTER TABLE tiles ADD COLUMN progress INTEGER DEFAULT 0;`); } catch {}
   try { await run(`ALTER TABLE player ADD COLUMN targetTileId TEXT;`); } catch {}
+  try { await run(`ALTER TABLE tiles ADD COLUMN feature TEXT;`); } catch {}
+  try { await run(`ALTER TABLE tiles ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`); } catch {}
 
   // 2) Ensure non-null progress
   await run(`UPDATE tiles SET progress = 0 WHERE progress IS NULL;`);
@@ -83,10 +64,25 @@ export async function initDb(): Promise<void> {
       END;
   `);
 
+  await run(`UPDATE tiles SET locked = 0 WHERE locked IS NULL;`);
+  await run(`UPDATE tiles SET feature = NULL WHERE feature IS NULL;`);
+
   // 4) Ensure player row exists
   const players = await all<{ id: number }>(`SELECT id FROM player WHERE id = 1;`);
   if (players.length === 0) {
     await run(`INSERT INTO player (id, xp, light, targetTileId) VALUES (1, 0, 0, NULL);`);
   }
+
+  // 5) Legacy region ids (pre multi-region)
+  await run(`UPDATE tiles SET region = 'wastelands_ash_dust' WHERE region = 'wastelands';`);
+  await run(`UPDATE tiles SET region = 'river_despair' WHERE region = 'river';`);
+  await run(`UPDATE tiles SET region = 'crystal_citadel' WHERE region = 'citadel';`);
+
+  // 6) Seed & sync
+  await seedInnerRealmIfEmpty();
+  await syncInnerRealmToLayout();
 }
+
+// Re-export low-level helpers for the rest of the app (keeps old imports working)
+export { all, exec, exec as execAsync, all as getAllAsync, run, run as runAsync } from "./dbCore";
 
