@@ -289,22 +289,23 @@ export function RealmMap(props: {
     return { lockX, lockY };
   }, [viewportW, viewportH, getEdges, edgeInset]);
 
+  const PAN_SLOP = 12;
+
   const panResponder = useMemo(() => {
     return PanResponder.create({
       onStartShouldSetPanResponderCapture: (evt) => {
         const touches = evt.nativeEvent.touches?.length ?? 0;
         return touches >= 2;
       },
-      onMoveShouldSetPanResponderCapture: (evt, gs) => {
+      onMoveShouldSetPanResponderCapture: (evt) => {
         const touches = evt.nativeEvent.touches?.length ?? 0;
-        if (touches >= 2) return true;
-        return Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4;
+        return touches >= 2;
       },
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches?.length ?? 0;
         if (touches >= 2) return true;
-        return Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4;
+        return Math.abs(gs.dx) > PAN_SLOP || Math.abs(gs.dy) > PAN_SLOP;
       },
 
       onPanResponderGrant: (evt) => {
@@ -446,7 +447,11 @@ export function RealmMap(props: {
         }}
         {...panResponder.panHandlers}
       >
-        <View ref={panLayerRef} collapsable={false} style={styles.panLayer}>
+        <View
+          ref={panLayerRef}
+          collapsable={false}
+          style={[styles.panLayer, { width: contentW, height: contentH }]}
+        >
           <View
             ref={scaleLayerRef}
             collapsable={false}
