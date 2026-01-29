@@ -21,14 +21,17 @@ function quoteIdent(name: string) {
 
 async function listTables(): Promise<string[]> {
   const rows = (await getAllAsync(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
   )) as any[];
   return rows.map((r) => r.name);
 }
 
 export async function exportDbJson(): Promise<string> {
   const tables = await listTables();
-  const out: ExportShape = { meta: { exportedAt: Date.now(), version: 1 }, tables: {} };
+  const out: ExportShape = {
+    meta: { exportedAt: Date.now(), version: 1 },
+    tables: {},
+  };
 
   for (const t of tables) {
     if (t.startsWith("sqlite_")) continue;
@@ -37,6 +40,19 @@ export async function exportDbJson(): Promise<string> {
   }
 
   return JSON.stringify(out, null, 2);
+}
+
+export async function resetWorldReseed(): Promise<void> {
+  await execAsync("BEGIN TRANSACTION");
+  try {
+    await execAsync("DELETE FROM tiles");
+    await execAsync("DELETE FROM sessions"); // volitelné
+    await execAsync("UPDATE player SET xp = 0, targetTileId = NULL");
+    await execAsync("COMMIT");
+  } catch (e) {
+    await execAsync("ROLLBACK");
+    throw e;
+  }
 }
 
 function buildInsert(table: string, row: any) {
@@ -87,5 +103,5 @@ export async function resetTiles(): Promise<void> {
 }
 
 export async function resetPlayer(): Promise<void> {
-  await execAsync("UPDATE player SET xp = 0, light = 0, targetTileId = NULL");
+  await execAsync("UPDATE player SET xp = 0, targetTileId = NULL");
 }

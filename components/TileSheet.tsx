@@ -4,32 +4,60 @@ import type { Tile } from "../lib/types";
 import { regionLabel } from "../lib/world/regions";
 import { MAX_LEVEL, segmentNeed, totalRequiredForLevel } from "./realm/tileUi";
 
+type SpendResource = "craft" | "lore" | "vigor" | "clarity";
+
+const SPEND_AMOUNTS = [5, 25, 60];
+
 type Props = {
   open: boolean;
   tile: Tile | null;
-  light: number;
+  craft: number;
+  lore: number;
+  vigor: number;
+  clarity: number;
+  gold?: number;
 
-  boostCost: number;
-  boostMinutes: number;
+  canInvest: boolean;
+  reason?: string;
+  statusLabel?: string;
 
   isTarget: boolean;
 
   onClose: () => void;
-  onBoost: () => Promise<void> | void;
-  onLogHere: () => void;
+  onSpend: (resource: SpendResource, minutes: number) => Promise<void> | void;
   onToggleTarget: () => Promise<void> | void;
 };
+
+function featureLabel(feature: Tile["feature"]): string {
+  if (!feature) return "None";
+  switch (feature) {
+    case "gate":
+      return "Gate";
+    case "void":
+      return "Void";
+    case "jailor_citadel":
+      return "Jailor Citadel";
+    case "black_star":
+      return "Black Star";
+    default:
+      return String(feature);
+  }
+}
 
 export function TileSheet({
   open,
   tile,
-  light,
-  boostCost,
-  boostMinutes,
+  craft,
+  lore,
+  vigor,
+  clarity,
+  gold,
+  canInvest,
+  reason,
+  statusLabel,
   isTarget,
   onClose,
-  onBoost,
-  onLogHere,
+  onSpend,
   onToggleTarget,
 }: Props) {
   const info = useMemo(() => {
@@ -48,8 +76,14 @@ export function TileSheet({
     return { level, isMax, start, need, within, ratio, nextTotal };
   }, [tile]);
 
-  const isLocked = !!tile && tile.locked === 1;
-  const canBoost = !!tile && !isLocked && tile.level < MAX_LEVEL && light >= boostCost;
+  const resourceRows: { key: SpendResource; label: string; value: number }[] = [
+    { key: "craft", label: "Craft", value: craft },
+    { key: "lore", label: "Lore", value: lore },
+    { key: "vigor", label: "Vigor", value: vigor },
+    { key: "clarity", label: "Clarity", value: clarity },
+  ];
+
+  const canSpend = !!tile && canInvest && !!info && !info.isMax;
 
   return (
     <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
@@ -61,37 +95,29 @@ export function TileSheet({
             {tile ? `${regionLabel(tile.region)} (${tile.row}, ${tile.col})` : "Tile"}
           </Text>
 
-          <View
-            style={[
-              styles.badge,
-              isLocked ? styles.badgeLocked : isTarget ? styles.badgeOn : styles.badgeOff,
-            ]}
-          >
-            <Text
-              style={[
-                styles.badgeText,
-                isLocked ? styles.badgeTextLocked : isTarget ? styles.badgeTextOn : styles.badgeTextOff,
-              ]}
-            >
-              {isLocked ? "🔒 Locked" : isTarget ? "🎯 Target" : "Tile"}
-            </Text>
-          </View>
+          {statusLabel ? (
+            <View style={[styles.badge, canInvest ? styles.badgeOn : styles.badgeOff]}>
+              <Text style={[styles.badgeText, canInvest ? styles.badgeTextOn : styles.badgeTextOff]}>
+                {statusLabel}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         {tile && info ? (
           <>
-            <View style={styles.statRow}>
-              <View style={styles.stat}>
-                <Text style={styles.statLabel}>Level</Text>
-                <Text style={styles.statValue}>{tile.level}</Text>
+            <View style={styles.metaRow}>
+              <View style={styles.metaPill}>
+                <Text style={styles.metaLabel}>Level</Text>
+                <Text style={styles.metaValue}>{tile.level}</Text>
               </View>
-              <View style={styles.stat}>
-                <Text style={styles.statLabel}>Invested</Text>
-                <Text style={styles.statValue}>{tile.progress}m</Text>
+              <View style={styles.metaPill}>
+                <Text style={styles.metaLabel}>Progress</Text>
+                <Text style={styles.metaValue}>{tile.progress}m</Text>
               </View>
-              <View style={styles.stat}>
-                <Text style={styles.statLabel}>Next</Text>
-                <Text style={styles.statValue}>{info.isMax ? "MAX" : `${info.within}/${info.need}m`}</Text>
+              <View style={styles.metaPill}>
+                <Text style={styles.metaLabel}>Feature</Text>
+                <Text style={styles.metaValue}>{featureLabel(tile.feature)}</Text>
               </View>
             </View>
 
@@ -99,37 +125,54 @@ export function TileSheet({
               <View style={[styles.barFill, { width: `${Math.round(info.ratio * 100)}%` }]} />
             </View>
 
-            {isLocked ? (
-              <Text style={styles.hint}>
-                This tile is locked. Unlocking rules aren&apos;t implemented yet (you can wire them into the store when ready).
-              </Text>
-            ) : (
-              <Text style={styles.hint}>Thresholds are cumulative and depend on region difficulty.</Text>
-            )}
+            <View style={styles.resourceRow}>
+              {resourceRows.map((r) => (
+                <View key={r.key} style={styles.resChip}>
+                  <Text style={styles.resLabel}>{r.label}</Text>
+                  <Text style={styles.resValue}>{r.value}</Text>
+                </View>
+              ))}
+              {typeof gold === "number" ? (
+                <View style={styles.resChip}>
+                  <Text style={styles.resLabel}>Gold</Text>
+                  <Text style={styles.resValue}>{gold}</Text>
+                </View>
+              ) : null}
+            </View>
+
+            {!canInvest && reason ? (
+              <Text style={styles.readonlyHint}>{reason}</Text>
+            ) : null}
+
+            <Text style={styles.sectionLabel}>Spend resources</Text>
+            {resourceRows.map((r) => (
+              <View key={r.key} style={styles.spendRow}>
+                <Text style={styles.spendLabel}>
+                  {r.label} ({r.value})
+                </Text>
+                <View style={styles.spendButtons}>
+                  {SPEND_AMOUNTS.map((amt) => {
+                    const disabled = !canSpend || r.value < amt;
+                    return (
+                      <Pressable
+                        key={`${r.key}-${amt}`}
+                        disabled={disabled}
+                        onPress={() => onSpend(r.key, amt)}
+                        style={[styles.spendBtn, disabled ? styles.btnDisabled : null]}
+                      >
+                        <Text style={[styles.spendBtnText, disabled ? styles.btnTextDisabled : null]}>
+                          +{amt}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ))}
 
             <View style={styles.actions}>
-              <Pressable
-                style={[styles.btnPrimary, isLocked ? { opacity: 0.45 } : null]}
-                disabled={isLocked}
-                onPress={onLogHere}
-              >
-                <Text style={styles.btnPrimaryText}>Log into this tile</Text>
-              </Pressable>
-
-              <Pressable
-                style={[styles.btnSecondary, isLocked ? { opacity: 0.45 } : null]}
-                disabled={isLocked}
-                onPress={onToggleTarget}
-              >
+              <Pressable style={styles.btnSecondary} onPress={onToggleTarget}>
                 <Text style={styles.btnSecondaryText}>{isTarget ? "Clear target" : "Set as target"}</Text>
-              </Pressable>
-
-              <Pressable
-                style={[styles.btnSecondary, canBoost ? null : { opacity: 0.45 }]}
-                disabled={!canBoost}
-                onPress={onBoost}
-              >
-                <Text style={styles.btnSecondaryText}>Boost +{boostMinutes}m ({boostCost} Light)</Text>
               </Pressable>
             </View>
           </>
@@ -161,24 +204,22 @@ const styles = StyleSheet.create({
   badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
   badgeOn: { backgroundColor: "#fff", borderColor: "#fff" },
   badgeOff: { backgroundColor: "#020305", borderColor: "#111827" },
-  badgeLocked: { backgroundColor: "#020305", borderColor: "#374151" },
 
   badgeText: { fontWeight: "900", fontSize: 12 },
   badgeTextOn: { color: "#000" },
   badgeTextOff: { color: "#e5e7eb" },
-  badgeTextLocked: { color: "#e5e7eb" },
 
-  statRow: { flexDirection: "row", gap: 10, marginTop: 12 },
-  stat: {
-    flex: 1,
+  metaRow: { flexDirection: "row", gap: 10, marginTop: 12, flexWrap: "wrap" },
+  metaPill: {
     backgroundColor: "#020305",
     borderColor: "#111827",
     borderWidth: 1,
-    borderRadius: 16,
-    padding: 10,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
-  statLabel: { color: "#9ca3af", fontSize: 11, fontWeight: "800" },
-  statValue: { color: "white", fontSize: 14, fontWeight: "900", marginTop: 6 },
+  metaLabel: { color: "#9ca3af", fontSize: 11, fontWeight: "800" },
+  metaValue: { color: "white", fontSize: 12, fontWeight: "900", marginTop: 4 },
 
   barTrack: {
     marginTop: 10,
@@ -189,7 +230,36 @@ const styles = StyleSheet.create({
   },
   barFill: { height: "100%", borderRadius: 999, backgroundColor: "rgba(255,255,255,0.85)" },
 
-  hint: { marginTop: 10, color: "#6b7280", fontSize: 12, lineHeight: 16 },
+  resourceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  resChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#020305",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  resLabel: { color: "#9ca3af", fontSize: 11, fontWeight: "800" },
+  resValue: { color: "#e5e7eb", fontWeight: "900" },
+
+  readonlyHint: { marginTop: 10, color: "#6b7280", fontSize: 12, lineHeight: 16 },
+
+  sectionLabel: { marginTop: 12, color: "#e5e7eb", fontWeight: "900", fontSize: 12 },
+  spendRow: { marginTop: 10 },
+  spendLabel: { color: "#9ca3af", fontSize: 12, fontWeight: "800", marginBottom: 6 },
+  spendButtons: { flexDirection: "row", gap: 8 },
+  spendBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: "#fff",
+  },
+  spendBtnText: { color: "#000", fontWeight: "900" },
+  btnDisabled: { backgroundColor: "#111827" },
+  btnTextDisabled: { color: "#6b7280" },
 
   actions: { marginTop: 12, gap: 10 },
 

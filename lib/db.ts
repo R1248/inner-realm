@@ -8,6 +8,11 @@ export async function initDb(): Promise<void> {
       id INTEGER PRIMARY KEY NOT NULL,
       xp INTEGER NOT NULL,
       light INTEGER NOT NULL,
+      craft INTEGER NOT NULL DEFAULT 0,
+      lore INTEGER NOT NULL DEFAULT 0,
+      vigor INTEGER NOT NULL DEFAULT 0,
+      clarity INTEGER NOT NULL DEFAULT 0,
+      gold INTEGER NOT NULL DEFAULT 0,
       targetTileId TEXT
     );
 
@@ -27,20 +32,80 @@ export async function initDb(): Promise<void> {
       createdAt INTEGER NOT NULL,
       activity TEXT NOT NULL,
       minutes INTEGER NOT NULL,
-      note TEXT
+      note TEXT,
+      subtype TEXT,
+      amount INTEGER,
+      tileId TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS timer_sessions (
+      id TEXT PRIMARY KEY NOT NULL,
+      activity TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      startedAt INTEGER NOT NULL,
+      endsAt INTEGER,
+      stoppedAt INTEGER,
+      status TEXT NOT NULL
     );
   `);
 
   // 1) MIGRATIONS first (so columns exist on older DBs)
-  try { await run(`ALTER TABLE tiles ADD COLUMN progress INTEGER DEFAULT 0;`); } catch {}
-  try { await run(`ALTER TABLE player ADD COLUMN targetTileId TEXT;`); } catch {}
-  try { await run(`ALTER TABLE tiles ADD COLUMN feature TEXT;`); } catch {}
-  try { await run(`ALTER TABLE tiles ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`); } catch {}
+  // tiles
+  try {
+    await run(`ALTER TABLE tiles ADD COLUMN progress INTEGER DEFAULT 0;`);
+  } catch {}
+  try {
+    await run(`ALTER TABLE tiles ADD COLUMN feature TEXT;`);
+  } catch {}
+  try {
+    await run(
+      `ALTER TABLE tiles ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;`,
+    );
+  } catch {}
 
-  // 2) Ensure non-null progress
+  // player
+  try {
+    await run(`ALTER TABLE player ADD COLUMN targetTileId TEXT;`);
+  } catch {}
+  for (const col of ["craft", "lore", "vigor", "clarity", "gold"] as const) {
+    try {
+      await run(
+        `ALTER TABLE player ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0;`,
+      );
+    } catch {}
+  }
+
+  // sessions
+  for (const [, ddl] of [
+    ["subtype", `ALTER TABLE sessions ADD COLUMN subtype TEXT;`],
+    ["amount", `ALTER TABLE sessions ADD COLUMN amount INTEGER;`],
+    ["tileId", `ALTER TABLE sessions ADD COLUMN tileId TEXT;`],
+  ] as const) {
+    try {
+      await run(ddl);
+    } catch {}
+  }
+
+  // timer_sessions
+  for (const ddl of [
+    `ALTER TABLE timer_sessions ADD COLUMN activity TEXT;`,
+    `ALTER TABLE timer_sessions ADD COLUMN mode TEXT;`,
+    `ALTER TABLE timer_sessions ADD COLUMN startedAt INTEGER;`,
+    `ALTER TABLE timer_sessions ADD COLUMN endsAt INTEGER;`,
+    `ALTER TABLE timer_sessions ADD COLUMN stoppedAt INTEGER;`,
+    `ALTER TABLE timer_sessions ADD COLUMN status TEXT;`,
+  ] as const) {
+    try {
+      await run(ddl);
+    } catch {}
+  }
+
+  // 2) Ensure non-null defaults
   await run(`UPDATE tiles SET progress = 0 WHERE progress IS NULL;`);
+  await run(`UPDATE tiles SET locked = 0 WHERE locked IS NULL;`);
+  await run(`UPDATE tiles SET feature = NULL WHERE feature IS NULL;`);
 
-  // 3) Legacy repair (NOW safe)
+  // 3) Legacy repair
   await run(`
     UPDATE tiles
     SET progress =
@@ -64,25 +129,46 @@ export async function initDb(): Promise<void> {
       END;
   `);
 
-  await run(`UPDATE tiles SET locked = 0 WHERE locked IS NULL;`);
-  await run(`UPDATE tiles SET feature = NULL WHERE feature IS NULL;`);
-
   // 4) Ensure player row exists
-  const players = await all<{ id: number }>(`SELECT id FROM player WHERE id = 1;`);
+  const players = await all<{ id: number }>(
+    `SELECT id FROM player WHERE id = 1;`,
+  );
   if (players.length === 0) {
-    await run(`INSERT INTO player (id, xp, light, targetTileId) VALUES (1, 0, 0, NULL);`);
+    await run(
+      `INSERT INTO player (id, xp, light, craft, lore, vigor, clarity, gold, targetTileId)
+       VALUES (1, 0, 0, 0, 0, 0, 0, 0, NULL);`,
+    );
   }
 
-  // 5) Legacy region ids (pre multi-region)
-  await run(`UPDATE tiles SET region = 'wastelands_ash_dust' WHERE region = 'wastelands';`);
-  await run(`UPDATE tiles SET region = 'river_despair' WHERE region = 'river';`);
-  await run(`UPDATE tiles SET region = 'crystal_citadel' WHERE region = 'citadel';`);
+  // 5) Ensure player resource cols are non-null (older DBs)
+  await run(`UPDATE player SET craft = 0 WHERE craft IS NULL;`);
+  await run(`UPDATE player SET lore = 0 WHERE lore IS NULL;`);
+  await run(`UPDATE player SET vigor = 0 WHERE vigor IS NULL;`);
+  await run(`UPDATE player SET clarity = 0 WHERE clarity IS NULL;`);
+  await run(`UPDATE player SET gold = 0 WHERE gold IS NULL;`);
 
-  // 6) Seed & sync
+  // 6) Legacy region ids (pre multi-region)
+  await run(
+    `UPDATE tiles SET region = 'wastelands_ash_dust' WHERE region = 'wastelands';`,
+  );
+  await run(
+    `UPDATE tiles SET region = 'river_despair' WHERE region = 'river';`,
+  );
+  await run(
+    `UPDATE tiles SET region = 'crystal_citadel' WHERE region = 'citadel';`,
+  );
+
+  // 7) Seed & sync
   await seedInnerRealmIfEmpty();
   await syncInnerRealmToLayout();
 }
 
 // Re-export low-level helpers for the rest of the app (keeps old imports working)
-export { all, exec, exec as execAsync, all as getAllAsync, run, run as runAsync } from "./dbCore";
-
+export {
+  all,
+  exec,
+  exec as execAsync,
+  all as getAllAsync,
+  run,
+  run as runAsync
+} from "./dbCore";

@@ -1,7 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { PanResponder, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import type { Tile } from "../../lib/types";
 import { INNER_REALM_LAYOUT } from "../../lib/world/innerRealmLayout";
+import {
+  buildTileIndex,
+  computeInvestableIds,
+  isFrontier,
+  isHardLocked,
+} from "../../lib/world/unlockRules";
 import { TileGrid } from "./TileGrid";
 
 type EdgeX = "left" | "right";
@@ -26,17 +38,21 @@ export function RealmMap(props: {
   height?: number;
   gap?: number;
   edgeInset?: number; // pixels reserved on right/bottom to avoid border/subpixel clipping
+  fill?: boolean;
 }) {
   const { width } = useWindowDimensions();
-  const height = props.height ?? 460;
   const gap = props.gap ?? 6;
   const edgeInset = props.edgeInset ?? 2;
+  const fill = !!props.fill;
+  const height = props.height ?? 460;
 
   // derive rows/cols from the canonical layout (NOT from persisted tiles)
   // This keeps the map size stable even if the DB still contains legacy extra rows/cols.
   const { rows, cols } = useMemo(() => {
     const rows = Number(INNER_REALM_LAYOUT.length);
-    const cols = Number(INNER_REALM_LAYOUT.reduce((m, line) => Math.max(m, line.length), 0));
+    const cols = Number(
+      INNER_REALM_LAYOUT.reduce((m, line) => Math.max(m, line.length), 0),
+    );
     return { rows, cols };
   }, []);
 
@@ -44,6 +60,29 @@ export function RealmMap(props: {
     const m = new Map<string, Tile>();
     for (const t of props.tiles) m.set(`${t.row}-${t.col}`, t);
     return m;
+  }, [props.tiles]);
+
+  const tileIndex = useMemo(() => buildTileIndex(props.tiles), [props.tiles]);
+
+  const investableTileIds = useMemo(
+    () => computeInvestableIds(props.tiles),
+    [props.tiles],
+  );
+
+  const frontierTileIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of props.tiles) {
+      if (isFrontier(t, tileIndex)) s.add(t.id);
+    }
+    return s;
+  }, [props.tiles, tileIndex]);
+
+  const hardLockedTileIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of props.tiles) {
+      if (isHardLocked(t)) s.add(t.id);
+    }
+    return s;
   }, [props.tiles]);
 
   const [viewportW, setViewportW] = useState(0);
@@ -64,7 +103,10 @@ export function RealmMap(props: {
   const tileSize = useMemo(() => {
     const base = viewportW > 0 ? viewportW : width - 40 - 12 * 2;
     const visibleCols = 8;
-    return Math.max(26, Math.min(64, Math.floor((base - gap * (visibleCols - 1)) / visibleCols)));
+    return Math.max(
+      26,
+      Math.min(64, Math.floor((base - gap * (visibleCols - 1)) / visibleCols)),
+    );
   }, [viewportW, width, gap]);
 
   const contentW = cols * tileSize + gap * (cols - 1);
@@ -105,27 +147,38 @@ export function RealmMap(props: {
 
       return { left, top, right, bottom };
     },
-    [contentW, contentH]
+    [contentW, contentH],
   );
 
-  const applyNativeTransform = useCallback((tx: number, ty: number, s: number) => {
-    txRef.current = tx;
-    tyRef.current = ty;
-    scaleRef.current = s;
+  const applyNativeTransform = useCallback(
+    (tx: number, ty: number, s: number) => {
+      txRef.current = tx;
+      tyRef.current = ty;
+      scaleRef.current = s;
 
-    // two layers => translate is in screen pixels (not scaled)
-    panLayerRef.current?.setNativeProps({
-      style: { transform: [{ translateX: tx }, { translateY: ty }] },
-    });
-    scaleLayerRef.current?.setNativeProps({
-      style: { transform: [{ scale: s }] },
-    });
-  }, []);
+      // two layers => translate is in screen pixels (not scaled)
+      panLayerRef.current?.setNativeProps({
+        style: {
+          width: contentW * s,
+          height: contentH * s,
+          transform: [{ translateX: tx }, { translateY: ty }],
+        },
+      });
+      scaleLayerRef.current?.setNativeProps({
+        style: { transform: [{ scale: s }] },
+      });
+    },
+    [contentW, contentH],
+  );
 
   const updateAnchorsFromCurrent = useCallback(() => {
     if (viewportW <= 0 || viewportH <= 0) return;
 
-    const { left, top, right, bottom } = getEdges(txRef.current, tyRef.current, scaleRef.current);
+    const { left, top, right, bottom } = getEdges(
+      txRef.current,
+      tyRef.current,
+      scaleRef.current,
+    );
 
     const rightEdgeGoal = viewportW - edgeInset;
     const bottomEdgeGoal = viewportH - edgeInset;
@@ -136,12 +189,20 @@ export function RealmMap(props: {
     const gapBottom = bottomEdgeGoal - bottom;
 
     // whichever side is closer becomes anchor
-    anchorRef.current.x = Math.abs(gapLeft) <= Math.abs(gapRight) ? "left" : "right";
-    anchorRef.current.y = Math.abs(gapTop) <= Math.abs(gapBottom) ? "top" : "bottom";
+    anchorRef.current.x =
+      Math.abs(gapLeft) <= Math.abs(gapRight) ? "left" : "right";
+    anchorRef.current.y =
+      Math.abs(gapTop) <= Math.abs(gapBottom) ? "top" : "bottom";
   }, [viewportW, viewportH, getEdges, edgeInset]);
 
   const clampTranslation = useCallback(
-    (nextTx: number, nextTy: number, s: number, lockX: EdgeX | null, lockY: EdgeY | null) => {
+    (
+      nextTx: number,
+      nextTy: number,
+      s: number,
+      lockX: EdgeX | null,
+      lockY: EdgeY | null,
+    ) => {
       if (viewportW <= 0 || viewportH <= 0) return { x: nextTx, y: nextTy };
 
       const W = contentW;
@@ -182,7 +243,7 @@ export function RealmMap(props: {
 
       return { x, y };
     },
-    [viewportW, viewportH, contentW, contentH, edgeInset]
+    [viewportW, viewportH, contentW, contentH, edgeInset],
   );
 
   const animateTo = useCallback(
@@ -208,13 +269,19 @@ export function RealmMap(props: {
 
       requestAnimationFrame(tick);
     },
-    [applyNativeTransform]
+    [applyNativeTransform],
   );
 
   const snapToBounds = useCallback(
     (animated: boolean) => {
       const s = clamp(scaleRef.current, minScale, maxScale);
-      const clamped = clampTranslation(txRef.current, tyRef.current, s, null, null);
+      const clamped = clampTranslation(
+        txRef.current,
+        tyRef.current,
+        s,
+        null,
+        null,
+      );
 
       if (animated) animateTo(clamped.x, clamped.y, s, 120);
       else {
@@ -224,10 +291,15 @@ export function RealmMap(props: {
 
       requestAnimationFrame(updateAnchorsFromCurrent);
     },
-    [animateTo, clampTranslation, applyNativeTransform, updateAnchorsFromCurrent]
+    [
+      animateTo,
+      clampTranslation,
+      applyNativeTransform,
+      updateAnchorsFromCurrent,
+    ],
   );
 
-  // init: center once; afterwards only clamp (don’t steal user position)
+  // init: center once; afterwards only clamp (don't steal user position)
   const didInitRef = useRef(false);
   useEffect(() => {
     if (viewportW <= 0 || viewportH <= 0) return;
@@ -250,9 +322,18 @@ export function RealmMap(props: {
       return;
     }
 
-    // content or viewport changed → keep within bounds
+    // content or viewport changed -> keep within bounds
     snapToBounds(false);
-  }, [viewportW, viewportH, contentW, contentH, clampTranslation, applyNativeTransform, snapToBounds, updateAnchorsFromCurrent]);
+  }, [
+    viewportW,
+    viewportH,
+    contentW,
+    contentH,
+    clampTranslation,
+    applyNativeTransform,
+    snapToBounds,
+    updateAnchorsFromCurrent,
+  ]);
 
   const gestureRef = useRef({
     mode: "none" as "none" | "pan" | "pinch",
@@ -265,9 +346,14 @@ export function RealmMap(props: {
   });
 
   const computeEdgeLock = useCallback(() => {
-    if (viewportW <= 0 || viewportH <= 0) return { lockX: null as EdgeX | null, lockY: null as EdgeY | null };
+    if (viewportW <= 0 || viewportH <= 0)
+      return { lockX: null as EdgeX | null, lockY: null as EdgeY | null };
 
-    const { left, top, right, bottom } = getEdges(txRef.current, tyRef.current, scaleRef.current);
+    const { left, top, right, bottom } = getEdges(
+      txRef.current,
+      tyRef.current,
+      scaleRef.current,
+    );
 
     const rightEdgeGoal = viewportW - edgeInset;
     const bottomEdgeGoal = viewportH - edgeInset;
@@ -297,9 +383,10 @@ export function RealmMap(props: {
         const touches = evt.nativeEvent.touches?.length ?? 0;
         return touches >= 2;
       },
-      onMoveShouldSetPanResponderCapture: (evt) => {
+      onMoveShouldSetPanResponderCapture: (evt, gs) => {
         const touches = evt.nativeEvent.touches?.length ?? 0;
-        return touches >= 2;
+        if (touches >= 2) return true;
+        return Math.abs(gs.dx) > PAN_SLOP || Math.abs(gs.dy) > PAN_SLOP;
       },
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: (evt, gs) => {
@@ -342,14 +429,15 @@ export function RealmMap(props: {
           const d = Math.max(1, dist2(t0, t1));
 
           // next scale
-          const raw = gestureRef.current.startScale * (d / gestureRef.current.startDist);
+          const raw =
+            gestureRef.current.startScale * (d / gestureRef.current.startDist);
           const nextScale = clamp(raw, minScale, maxScale);
 
           // focal relative to viewport
           const vx = viewportAbsRef.current.x;
           const vy = viewportAbsRef.current.y;
-          const fx = (((t0?.pageX ?? 0) + (t1?.pageX ?? 0)) / 2) - vx;
-          const fy = (((t0?.pageY ?? 0) + (t1?.pageY ?? 0)) / 2) - vy;
+          const fx = ((t0?.pageX ?? 0) + (t1?.pageX ?? 0)) / 2 - vx;
+          const fy = ((t0?.pageY ?? 0) + (t1?.pageY ?? 0)) / 2 - vy;
 
           const curScale = scaleRef.current;
           const k = nextScale / Math.max(0.0001, curScale);
@@ -366,7 +454,13 @@ export function RealmMap(props: {
             gestureRef.current.startDist = d;
           }
 
-          const clamped = clampTranslation(nextTx, nextTy, nextScale, gestureRef.current.lockX, gestureRef.current.lockY);
+          const clamped = clampTranslation(
+            nextTx,
+            nextTy,
+            nextScale,
+            gestureRef.current.lockX,
+            gestureRef.current.lockY,
+          );
           applyNativeTransform(clamped.x, clamped.y, nextScale);
           scheduleUiScaleUpdate(nextScale);
           return;
@@ -403,43 +497,28 @@ export function RealmMap(props: {
       },
       onPanResponderTerminationRequest: () => true,
     });
-  }, [applyNativeTransform, clampTranslation, computeEdgeLock, contentW, contentH, scheduleUiScaleUpdate, snapToBounds, updateAnchorsFromCurrent, updateViewportAbs]);
-
-  const zoomTo = useCallback(
-    (nextScale: number) => {
-      if (viewportW <= 0 || viewportH <= 0) return;
-
-      const curScale = scaleRef.current;
-      const s = clamp(nextScale, minScale, maxScale);
-
-      // zoom around viewport center
-      const fx = viewportW / 2;
-      const fy = viewportH / 2;
-
-      const k = s / Math.max(0.0001, curScale);
-      const cx = contentW / 2;
-      const cy = contentH / 2;
-
-      const nextTx = k * txRef.current + (1 - k) * (fx - cx);
-      const nextTy = k * tyRef.current + (1 - k) * (fy - cy);
-
-      const { lockX, lockY } = computeEdgeLock();
-      const clamped = clampTranslation(nextTx, nextTy, s, lockX, lockY);
-      animateTo(clamped.x, clamped.y, s, 120);
-    },
-    [viewportW, viewportH, contentW, contentH, computeEdgeLock, clampTranslation, animateTo]
-  );
+  }, [
+    applyNativeTransform,
+    clampTranslation,
+    computeEdgeLock,
+    contentW,
+    contentH,
+    scheduleUiScaleUpdate,
+    snapToBounds,
+    updateAnchorsFromCurrent,
+    updateViewportAbs,
+  ]);
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, fill ? styles.wrapFill : null]}>
       <Text style={styles.meta}>
-        Grid: {rows}×{cols} • Scale: {Math.round(uiScale * 100)}%
+        Grid: {rows}x{cols} - Scale: {Math.round(uiScale * 100)}%
       </Text>
 
       <View
         ref={viewportRef}
         collapsable={false}
-        style={[styles.viewport, { height }]}
+        style={[styles.viewport, fill ? styles.viewportFill : { height }]}
         onLayout={(e) => {
           setViewportW(e.nativeEvent.layout.width);
           setViewportH(e.nativeEvent.layout.height);
@@ -450,7 +529,7 @@ export function RealmMap(props: {
         <View
           ref={panLayerRef}
           collapsable={false}
-          style={[styles.panLayer, { width: contentW, height: contentH }]}
+          style={[styles.panLayer, { width: contentW * uiScale, height: contentH * uiScale }]}
         >
           <View
             ref={scaleLayerRef}
@@ -461,6 +540,9 @@ export function RealmMap(props: {
               rows={rows}
               cols={cols}
               tileMap={tileMap}
+              investableTileIds={investableTileIds}
+              frontierTileIds={frontierTileIds}
+              hardLockedTileIds={hardLockedTileIds}
               tileSize={tileSize}
               gap={gap}
               targetTileId={props.targetTileId}
@@ -468,18 +550,7 @@ export function RealmMap(props: {
             />
           </View>
         </View>
-
-        <View style={styles.zoomBox} pointerEvents="box-none">
-          <Pressable style={styles.zoomBtn} onPress={() => zoomTo(scaleRef.current * 1.15)}>
-            <Text style={styles.zoomBtnText}>＋</Text>
-          </Pressable>
-          <Pressable style={styles.zoomBtn} onPress={() => zoomTo(scaleRef.current / 1.15)}>
-            <Text style={styles.zoomBtnText}>－</Text>
-          </Pressable>
-        </View>
       </View>
-
-      <Text style={styles.hint}>Tip: pinch to zoom, drag to pan.</Text>
     </View>
   );
 }
@@ -493,6 +564,8 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     padding: 12,
   },
+  wrapFill: { flex: 1, minHeight: 0 },
+
   meta: { color: "#6b7280", fontSize: 11, marginBottom: 8 },
 
   viewport: {
@@ -503,6 +576,7 @@ const styles = StyleSheet.create({
     borderColor: "#0b1220",
     backgroundColor: "#020305",
   },
+  viewportFill: { flex: 1, minHeight: 0 },
 
   panLayer: {
     position: "absolute",
@@ -514,19 +588,4 @@ const styles = StyleSheet.create({
     left: 0,
     top: 0,
   },
-
-  zoomBox: { position: "absolute", right: 10, bottom: 10, gap: 10 },
-  zoomBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: "#050608",
-    borderColor: "#111827",
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  zoomBtnText: { color: "white", fontSize: 22, fontWeight: "900" },
-
-  hint: { color: "#6b7280", fontSize: 11, marginTop: 10 },
 });

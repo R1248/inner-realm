@@ -1,29 +1,94 @@
 import { create } from "zustand";
 import { all, initDb, run } from "../lib/db";
-import type { ActivityType, LockedFlag, Session, Tile, TileFeature } from "../lib/types";
-import { allowedActivitiesForRegion, regionTier } from "../lib/world/regions";
-import { applyMinutes, MAX_LEVEL, tileProgressRatio } from "../lib/world/progression";
+import {
+  isCoreActivity,
+  normalizeActivity,
+  resourceGainsForSession,
+} from "../lib/resourceModel";
+import type {
+  ActivityType,
+  LockedFlag,
+  Session,
+  Tile,
+  TileFeature,
+} from "../lib/types";
+import { applyMinutes, MAX_LEVEL, totalRequiredForLevel } from "../lib/world/progression";
+import { allowedActivitiesForRegion } from "../lib/world/regions";
+import {
+  applyGateUnlock,
+  buildTileIndex,
+  canInvest,
+  hasOpenedGate,
+  investabilityReason,
+  pickStartAnchorId,
+} from "../lib/world/unlockRules";
+
+type SpendableResource = "craft" | "lore" | "vigor" | "clarity";
+
+const ACTIVITY_FOR_RESOURCE: Record<SpendableResource, ActivityType> = {
+  craft: "work",
+  lore: "study",
+  vigor: "sport",
+  clarity: "mindfulness",
+};
+
+function isActivityAllowedOnTile(activity: ActivityType, tile: Tile): boolean {
+  const a = normalizeActivity(activity);
+  const allowed = allowedActivitiesForRegion(tile.region);
+
+  // Backwards-compat: some realms still list "meditation".
+  if (a === "mindfulness" && allowed.includes("meditation")) return true;
+
+  return allowed.includes(a);
+}
+
+function clampInt(n: any, min: number, max?: number): number {
+  const v = Math.floor(Number(n) || 0);
+  if (typeof max === "number") return Math.max(min, Math.min(max, v));
+  return Math.max(min, v);
+}
 
 type GameState = {
   isReady: boolean;
+
+  // player stats
   xp: number;
-  light: number;
+  craft: number;
+  lore: number;
+  vigor: number;
+  clarity: number;
+  gold: number;
 
   tiles: Tile[];
   sessions: Session[];
 
   targetTileId: string | null;
 
-  boostCost: number;
-  boostMinutes: number;
-
   init: () => Promise<void>;
   setTargetTile: (tileId: string | null) => Promise<void>;
 
-  // tileIdOverride = "log session into this tile"
-  addSession: (activity: ActivityType, minutes: number, note?: string, tileIdOverride?: string) => Promise<void>;
+  // NOTE: sessions no longer invest into tiles; they only grant resources.
+  addSession: (
+    activity: ActivityType,
+    minutes: number,
+    subtype?: string | null,
+    amount?: number | null,
+    note?: string,
+  ) => Promise<
+    | { ok: true; tileId: string | null; unlockedTile: boolean }
+    | { ok: false; reason: string }
+  >;
 
-  spendLightBoostTile: (tileId: string) => Promise<void>;
+  /** Spend a resource pool to progress a tile (and unlock it once it reaches Level 1). */
+  spendResourceOnTile: (
+    tileId: string,
+    resource: SpendableResource,
+    minutes: number,
+  ) => Promise<
+    | { ok: true; unlockedNow: boolean }
+    | { ok: false; reason: string }
+  >;
+
 };
 
 function normalizeTiles(rows: any[]): Tile[] {
@@ -49,47 +114,100 @@ function normalizeSessions(rows: any[]): Session[] {
     activity: s.activity as ActivityType,
     minutes: Number(s.minutes),
     note: s.note ?? null,
+    subtype: s.subtype ?? null,
+    amount: s.amount ?? null,
   }));
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
   isReady: false,
+
   xp: 0,
-  light: 0,
+  craft: 0,
+  lore: 0,
+  vigor: 0,
+  clarity: 0,
+  gold: 0,
+
   tiles: [],
   sessions: [],
   targetTileId: null,
-
-  boostCost: 3,
-  boostMinutes: 60,
 
   init: async () => {
     await initDb();
 
     // Player
-    const playerRows = await all<{ xp: number; light: number; targetTileId?: string | null }>(
-      `SELECT xp, light, targetTileId FROM player WHERE id = 1;`
+    const playerRows = await all<{
+      xp: number;
+      craft: number;
+      lore: number;
+      vigor: number;
+      clarity: number;
+      gold: number;
+      targetTileId?: string | null;
+    }>(
+      `SELECT xp, craft, lore, vigor, clarity, gold, targetTileId FROM player WHERE id = 1;`,
     );
+
     const xp = Number(playerRows[0]?.xp ?? 0);
-    const light = Number(playerRows[0]?.light ?? 0);
+    const craft = Number(playerRows[0]?.craft ?? 0);
+    const lore = Number(playerRows[0]?.lore ?? 0);
+    const vigor = Number(playerRows[0]?.vigor ?? 0);
+    const clarity = Number(playerRows[0]?.clarity ?? 0);
+    const gold = Number(playerRows[0]?.gold ?? 0);
     const targetTileIdRaw = (playerRows[0]?.targetTileId ?? null) as string | null;
 
     // Tiles
     const tileRows = await all<any>(
-      `SELECT id, row, col, region, level, progress, feature, locked FROM tiles;`
+      `SELECT id, row, col, region, level, progress, feature, locked FROM tiles;`,
     );
 
     // Sessions
     const sessionRows = await all<any>(
-      `SELECT id, createdAt, activity, minutes, note FROM sessions ORDER BY createdAt DESC LIMIT 500;`
+      `SELECT id, createdAt, activity, minutes, note, subtype, amount
+       FROM sessions
+       ORDER BY createdAt DESC
+       LIMIT 500;`,
     );
 
-    const tiles = normalizeTiles(tileRows);
+    let tiles = normalizeTiles(tileRows);
     const sessions = normalizeSessions(sessionRows);
 
-    // Validate target: must exist AND not be locked
+    // If any Gate is conquered, ensure Great Depths are not hard-locked (older DBs).
+    const gateIndex = buildTileIndex(tiles);
+    if (hasOpenedGate(gateIndex)) {
+      const anyLockedDepths = tiles.some((t) => t.region === "great_depths" && t.locked === 1);
+      if (anyLockedDepths) {
+        await run(`UPDATE tiles SET locked = 0 WHERE region = 'great_depths' AND locked = 1;`);
+        tiles = tiles.map((t) =>
+          t.region === "great_depths"
+            ? ({ ...t, locked: 0 as LockedFlag } satisfies Tile)
+            : t,
+        );
+      }
+    }
+
+    // Bootstrap: ensure at least one conquered tile exists.
+    const hasConquered = tiles.some((t) => t.level >= 1 && t.feature !== "void" && t.locked === 0);
+    if (!hasConquered) {
+      const startId = pickStartAnchorId(tiles);
+      if (startId) {
+        const start = tiles.find((t) => t.id === startId);
+        if (start) {
+          const req = totalRequiredForLevel(1, start.region);
+          await run(`UPDATE tiles SET level = 1, progress = ? WHERE id = ?;`, [req, startId]);
+          tiles = tiles.map((t) =>
+            t.id === startId ? ({ ...t, level: 1, progress: req } satisfies Tile) : t,
+          );
+        }
+      }
+    }
+
+    // Validate target: must exist AND not be hard-locked / Void
     let targetTileId: string | null = targetTileIdRaw;
-    const targetOk = targetTileId ? tiles.some((t) => t.id === targetTileId && t.locked === 0) : true;
+    const tileIndex = buildTileIndex(tiles);
+    const target = targetTileId ? (tileIndex.byId.get(targetTileId) ?? null) : null;
+    const targetOk = target ? (target.feature !== "void" && target.locked === 0) : true;
 
     if (!targetOk) {
       targetTileId = null;
@@ -99,7 +217,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({
       isReady: true,
       xp,
-      light,
+      craft,
+      lore,
+      vigor,
+      clarity,
+      gold,
       tiles,
       sessions,
       targetTileId,
@@ -108,105 +230,79 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   setTargetTile: async (tileId) => {
     if (tileId) {
-      const t = get().tiles.find((x) => x.id === tileId) ?? null;
-      if (!t || t.locked === 1) return;
+      const tiles = get().tiles;
+      const index = buildTileIndex(tiles);
+      const t = index.byId.get(tileId) ?? null;
+      if (!t) return;
+      if (t.feature === "void" || t.locked === 1) return;
     }
 
     await run(`UPDATE player SET targetTileId = ? WHERE id = 1;`, [tileId ?? null]);
     set({ targetTileId: tileId ?? null });
   },
 
-  addSession: async (activity, minutes, note, tileIdOverride) => {
-    const safeMinutes = Math.max(1, Math.floor(Number(minutes) || 0));
-    const now = Date.now();
-    const id = `${now}-${Math.random().toString(16).slice(2)}`;
 
-    const xpGain = safeMinutes;
-    const lightGain = Math.max(1, Math.floor(safeMinutes / 10));
+  addSession: async (activityRaw, minutes, subtype, amount, note) => {
+    const activity = normalizeActivity(activityRaw);
 
-    const tiles = [...get().tiles];
-    const targetTileId = get().targetTileId;
+    const isIncome = activity === "income";
+    const isCore = isCoreActivity(activity);
 
-    // Decide tile to receive minutes:
-    // 1) tileIdOverride (log session into this tile)
-    // 2) targetTileId (if set)
-    // 3) auto-pick: any tile that allows the activity
-    let chosen: Tile | null = null;
+    const safeMinutes = isIncome ? 0 : clampInt(minutes, 1);
+    const safeAmount = amount == null ? null : Math.floor(Number(amount) || 0);
 
-    const forcedId = (tileIdOverride ?? targetTileId) ?? null;
-
-    if (forcedId) {
-      const forced = tiles.find((t) => t.id === forcedId) ?? null;
-      if (!forced) return;
-
-      // locked tiles cannot receive minutes
-      if (forced.locked === 1) return;
-
-      // Validate activity matches chosen.region (rules come from region registry)
-      const allowed = allowedActivitiesForRegion(forced.region);
-      if (!allowed.includes(activity)) return;
-
-      chosen = forced;
-    } else {
-      let candidates = tiles.filter(
-        (t) => t.locked === 0 && t.level < MAX_LEVEL && allowedActivitiesForRegion(t.region).includes(activity)
-      );
-
-      // If you maxed all tiles for this activity, fall back to any non-locked tile.
-      if (candidates.length === 0) {
-        candidates = tiles.filter((t) => t.locked === 0 && t.level < MAX_LEVEL);
-      }
-
-      if (candidates.length > 0) {
-        // pick:
-        // 1) lowest region tier (earlier regions first)
-        // 2) lowest level
-        // 3) lowest progress ratio within current segment
-        // 4) stable by row/col
-        candidates.sort((a, b) => {
-          const ta = regionTier(a.region);
-          const tb = regionTier(b.region);
-          if (ta !== tb) return ta - tb;
-
-          if (a.level !== b.level) return a.level - b.level;
-
-          const ar = tileProgressRatio(a);
-          const br = tileProgressRatio(b);
-          if (ar !== br) return ar - br;
-
-          return a.row - b.row || a.col - b.col;
-        });
-
-        chosen = candidates[0];
+    if (isIncome) {
+      if (!safeAmount || safeAmount <= 0) {
+        return { ok: false, reason: "Income sessions require a positive amount." };
       }
     }
 
+    const now = Date.now();
+    const id = `${now}-${Math.random().toString(16).slice(2)}`;
+
+    // XP is tied to time, and only for core activities.
+    const xpGain = isCore ? safeMinutes : 0;
+
+    const delta = resourceGainsForSession({
+      activity,
+      minutes: safeMinutes,
+      amount: safeAmount,
+      subtype,
+    });
+
     await run("BEGIN;");
     try {
-      // Session row
-      await run(`INSERT INTO sessions (id, createdAt, activity, minutes, note) VALUES (?, ?, ?, ?, ?);`, [
-        id,
-        now,
-        activity,
-        safeMinutes,
-        note ?? null,
-      ]);
-
-      // Player xp/light
+      // Player
       const nextXp = get().xp + xpGain;
-      const nextLight = get().light + lightGain;
-      await run(`UPDATE player SET xp = ?, light = ? WHERE id = 1;`, [nextXp, nextLight]);
+      const nextCraft = get().craft + Number(delta.craft ?? 0);
+      const nextLore = get().lore + Number(delta.lore ?? 0);
+      const nextVigor = get().vigor + Number(delta.vigor ?? 0);
+      const nextClarity = get().clarity + Number(delta.clarity ?? 0);
+      const nextGold = get().gold + Number(delta.gold ?? 0);
 
-      // Tile update if chosen
-      let nextTiles = tiles;
-      if (chosen) {
-        const idx = tiles.findIndex((t) => t.id === chosen!.id);
-        const updated = applyMinutes(chosen, safeMinutes);
-        nextTiles = [...tiles];
-        nextTiles[idx] = updated;
+      // Session row (tileId is intentionally NULL now)
+      await run(
+        `INSERT INTO sessions (id, createdAt, activity, minutes, note, subtype, amount, tileId)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+        [
+          id,
+          now,
+          activity,
+          safeMinutes,
+          note ?? null,
+          subtype ?? null,
+          safeAmount,
+          null,
+        ],
+      );
 
-        await run(`UPDATE tiles SET level = ?, progress = ? WHERE id = ?;`, [updated.level, updated.progress, updated.id]);
-      }
+      // Player update
+      await run(
+        `UPDATE player
+           SET xp = ?, craft = ?, lore = ?, vigor = ?, clarity = ?, gold = ?
+         WHERE id = 1;`,
+        [nextXp, nextCraft, nextLore, nextVigor, nextClarity, nextGold],
+      );
 
       await run("COMMIT;");
 
@@ -216,49 +312,89 @@ export const useGameStore = create<GameState>((set, get) => ({
         activity,
         minutes: safeMinutes,
         note: note ?? null,
+        subtype: subtype ?? null,
+        amount: safeAmount,
       };
 
       set({
-        xp: get().xp + xpGain,
-        light: get().light + lightGain,
-        tiles: nextTiles,
+        xp: nextXp,
+        craft: nextCraft,
+        lore: nextLore,
+        vigor: nextVigor,
+        clarity: nextClarity,
+        gold: nextGold,
         sessions: [newSession, ...get().sessions],
       });
+
+      return { ok: true, tileId: null, unlockedTile: false };
     } catch (e) {
       await run("ROLLBACK;");
       throw e;
     }
   },
 
-  spendLightBoostTile: async (tileId) => {
-    const { tiles, light, boostCost, boostMinutes } = get();
-    if (light < boostCost) return;
+  spendResourceOnTile: async (tileId, resource, minutes) => {
+    const spend = clampInt(minutes, 1);
+    const state = get();
+    const pool = Number((state as any)[resource] ?? 0);
+    if (pool < spend) {
+      return { ok: false, reason: `Not enough ${resource}.` };
+    }
 
-    const idx = tiles.findIndex((t) => t.id === tileId);
-    if (idx === -1) return;
+    const tiles = state.tiles;
+    const index = buildTileIndex(tiles);
+    const t = index.byId.get(tileId) ?? null;
+    if (!t) return { ok: false, reason: "Unknown tile." };
 
-    const t = tiles[idx];
+    if (!canInvest(t, index)) {
+      return { ok: false, reason: investabilityReason(t, index) };
+    }
+    if (t.level >= MAX_LEVEL) {
+      return { ok: false, reason: "Tile is already maxed." };
+    }
 
-    // locked / maxed tiles cannot be boosted
-    if (t.locked === 1) return;
-    if (t.level >= MAX_LEVEL) return;
+    const activity = ACTIVITY_FOR_RESOURCE[resource];
+    if (!isActivityAllowedOnTile(activity, t)) {
+      return {
+        ok: false,
+        reason: "This resource doesn't match the tile's realm.",
+      };
+    }
 
-    const nextLight = light - boostCost;
-    const updated = applyMinutes(t, boostMinutes);
+    const updated: Tile = applyMinutes(t, spend);
+    const unlockedNow = t.level < 1 && updated.level >= 1;
+    const gateOpenedNow = t.feature === "gate" && unlockedNow;
+
+    const nextPool = pool - spend;
 
     await run("BEGIN;");
     try {
-      await run(`UPDATE tiles SET level = ?, progress = ? WHERE id = ?;`, [updated.level, updated.progress, updated.id]);
-      await run(`UPDATE player SET light = ? WHERE id = 1;`, [nextLight]);
+      await run(
+        `UPDATE tiles SET level = ?, progress = ? WHERE id = ?;`,
+        [updated.level, updated.progress, updated.id],
+      );
+      await run(`UPDATE player SET ${resource} = ? WHERE id = 1;`, [nextPool]);
+      if (gateOpenedNow) {
+        await applyGateUnlock(run);
+      }
       await run("COMMIT;");
     } catch (e) {
       await run("ROLLBACK;");
       throw e;
     }
 
-    const nextTiles = [...tiles];
-    nextTiles[idx] = updated;
+    let nextTiles = tiles.map((x) => (x.id === updated.id ? updated : x));
+    if (gateOpenedNow) {
+      nextTiles = nextTiles.map((x) =>
+        x.region === "great_depths" ? ({ ...x, locked: 0 as LockedFlag } satisfies Tile) : x,
+      );
+    }
+    set({
+      tiles: nextTiles,
+      ...({ [resource]: nextPool } as any),
+    });
 
-    set({ light: nextLight, tiles: nextTiles });
+    return { ok: true, unlockedNow };
   },
+
 }));

@@ -10,20 +10,21 @@ import {
   View,
 } from "react-native";
 import { AppHeader } from "../../components/AppHeader";
-import { useGameStore } from "../../store/useGameStore";
-import {
-  listUserTables,
-  getTableInfo,
-  getTableRows,
-  runSqlGetAll,
-} from "../../lib/devtools/dbIntrospect";
 import {
   exportDbJson,
   importDbJson,
+  resetPlayer,
   resetSessions,
   resetTiles,
-  resetPlayer,
+  resetWorldReseed,
 } from "../../lib/devtools/dbBackup";
+import {
+  getTableInfo,
+  getTableRows,
+  listUserTables,
+  runSqlGetAll,
+} from "../../lib/devtools/dbIntrospect";
+import { useGameStore } from "../../store/useGameStore";
 
 type TableInfo = {
   name: string;
@@ -47,9 +48,11 @@ export default function DevToolsScreen() {
   const [exportText, setExportText] = useState<string>("");
   const [importText, setImportText] = useState<string>("");
 
-  const [stats, setStats] = useState<{ sessions: number; tiles: number; player: number } | null>(
-    null
-  );
+  const [stats, setStats] = useState<{
+    sessions: number;
+    tiles: number;
+    player: number;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refreshTables = useCallback(async () => {
@@ -60,9 +63,15 @@ export default function DevToolsScreen() {
 
   const refreshStats = useCallback(async () => {
     try {
-      const s = await runSqlGetAll<{ c: number }>("SELECT COUNT(*) as c FROM sessions");
-      const t = await runSqlGetAll<{ c: number }>("SELECT COUNT(*) as c FROM tiles");
-      const p = await runSqlGetAll<{ c: number }>("SELECT COUNT(*) as c FROM player");
+      const s = await runSqlGetAll<{ c: number }>(
+        "SELECT COUNT(*) as c FROM sessions",
+      );
+      const t = await runSqlGetAll<{ c: number }>(
+        "SELECT COUNT(*) as c FROM tiles",
+      );
+      const p = await runSqlGetAll<{ c: number }>(
+        "SELECT COUNT(*) as c FROM player",
+      );
       setStats({
         sessions: s?.[0]?.c ?? 0,
         tiles: t?.[0]?.c ?? 0,
@@ -147,7 +156,7 @@ export default function DevToolsScreen() {
             }
           },
         },
-      ]
+      ],
     );
   }, [importText, init, refreshAll]);
 
@@ -173,7 +182,7 @@ export default function DevToolsScreen() {
         },
       ]);
     },
-    [init, refreshAll]
+    [init, refreshAll],
   );
 
   const doResetSessions = useCallback(() => {
@@ -181,16 +190,45 @@ export default function DevToolsScreen() {
   }, [confirm]);
 
   const doResetTiles = useCallback(() => {
-    confirm("Reset tiles", "Set all tiles to level=0 and progress=0?", resetTiles);
+    confirm(
+      "Reset tiles",
+      "Set all tiles to level=0 and progress=0?",
+      resetTiles,
+    );
   }, [confirm]);
 
   const doResetPlayer = useCallback(() => {
-    confirm("Reset player", "Set player xp/light/targetTileId back to defaults?", resetPlayer);
+    confirm(
+      "Reset player",
+      "Set player xp/targetTileId back to defaults?",
+      resetPlayer,
+    );
   }, [confirm]);
+
+  const doResetWorldReseed = useCallback(() => {
+    confirm(
+      "Reset world (reseed)",
+      "Deletes ALL tiles (and sessions) so the world is re-seeded from layout on next init. Continue?",
+      async () => {
+        setBusy(true);
+        try {
+          await resetWorldReseed();
+          await refreshAll();
+        } finally {
+          setBusy(false);
+        }
+      },
+    );
+  }, [confirm, refreshAll]);
 
   if (!isReady) {
     return (
-      <View style={[styles.screen, { alignItems: "center", justifyContent: "center" }]}>
+      <View
+        style={[
+          styles.screen,
+          { alignItems: "center", justifyContent: "center" },
+        ]}
+      >
         <Text style={{ color: "#9ca3af", fontWeight: "800" }}>Loading…</Text>
       </View>
     );
@@ -198,19 +236,26 @@ export default function DevToolsScreen() {
 
   return (
     <View style={styles.screen}>
-      <AppHeader title="Dev Tools" subtitle="DB viewer • reset • export/import" />
+      <AppHeader
+        title="Dev Tools"
+        subtitle="DB viewer • reset • export/import"
+      />
 
-      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}>
+      <ScrollView
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}
+      >
         <View style={styles.section}>
           <Text style={styles.h2}>Quick stats</Text>
           <Text style={styles.mono}>
-            sessions: {stats?.sessions ?? "—"} • tiles: {stats?.tiles ?? "—"} • player:{" "}
-            {stats?.player ?? "—"}
+            sessions: {stats?.sessions ?? "—"} • tiles: {stats?.tiles ?? "—"} •
+            player: {stats?.player ?? "—"}
           </Text>
 
           <View style={styles.row}>
             <Pressable style={styles.btn} onPress={refreshAll} disabled={busy}>
-              <Text style={styles.btnText}>{busy ? "Working…" : "Refresh"}</Text>
+              <Text style={styles.btnText}>
+                {busy ? "Working…" : "Refresh"}
+              </Text>
             </Pressable>
 
             <Pressable style={styles.btn} onPress={doExport} disabled={busy}>
@@ -222,19 +267,40 @@ export default function DevToolsScreen() {
         <View style={styles.section}>
           <Text style={styles.h2}>Reset</Text>
           <Text style={styles.note}>
-            These actions modify your local SQLite DB. Use export first if you want a backup.
+            These actions modify your local SQLite DB. Use export first if you
+            want a backup.
           </Text>
 
           <View style={styles.rowWrap}>
-            <Pressable style={[styles.btn, styles.danger]} onPress={doResetSessions} disabled={busy}>
+            <Pressable
+              style={[styles.btn, styles.danger]}
+              onPress={doResetSessions}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Reset sessions</Text>
             </Pressable>
 
-            <Pressable style={[styles.btn, styles.danger]} onPress={doResetTiles} disabled={busy}>
+            <Pressable
+              style={[styles.btn, styles.danger]}
+              onPress={doResetTiles}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Reset tiles</Text>
             </Pressable>
 
-            <Pressable style={[styles.btn, styles.danger]} onPress={doResetPlayer} disabled={busy}>
+            <Pressable
+              style={[styles.btn, styles.danger]}
+              onPress={doResetWorldReseed}
+              disabled={busy}
+            >
+              <Text style={styles.btnText}>Reset world (reseed)</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.btn, styles.danger]}
+              onPress={doResetPlayer}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Reset player</Text>
             </Pressable>
           </View>
@@ -243,7 +309,8 @@ export default function DevToolsScreen() {
         <View style={styles.section}>
           <Text style={styles.h2}>Import</Text>
           <Text style={styles.note}>
-            Paste JSON exported from this screen. Import overwrites tables (player/tiles/sessions).
+            Paste JSON exported from this screen. Import overwrites tables
+            (player/tiles/sessions).
           </Text>
 
           <TextInput
@@ -256,11 +323,19 @@ export default function DevToolsScreen() {
           />
 
           <View style={styles.row}>
-            <Pressable style={[styles.btn, styles.danger]} onPress={doImport} disabled={busy}>
+            <Pressable
+              style={[styles.btn, styles.danger]}
+              onPress={doImport}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Import (overwrite)</Text>
             </Pressable>
 
-            <Pressable style={styles.btn} onPress={() => setImportText("")} disabled={busy}>
+            <Pressable
+              style={styles.btn}
+              onPress={() => setImportText("")}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Clear</Text>
             </Pressable>
           </View>
@@ -268,7 +343,9 @@ export default function DevToolsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.h2}>DB viewer</Text>
-          <Text style={styles.note}>Tap a table, then inspect first N rows.</Text>
+          <Text style={styles.note}>
+            Tap a table, then inspect first N rows.
+          </Text>
 
           <View style={styles.tableChips}>
             {tables.map((t) => (
@@ -277,7 +354,12 @@ export default function DevToolsScreen() {
                 onPress={() => setSelectedTable(t)}
                 style={[styles.chip, selectedTable === t && styles.chipActive]}
               >
-                <Text style={[styles.chipText, selectedTable === t && styles.chipTextActive]}>
+                <Text
+                  style={[
+                    styles.chipText,
+                    selectedTable === t && styles.chipTextActive,
+                  ]}
+                >
                   {t}
                 </Text>
               </Pressable>
@@ -289,18 +371,26 @@ export default function DevToolsScreen() {
             <TextInput
               value={String(limit)}
               onChangeText={(v) =>
-                setLimit(Math.max(1, Math.min(500, parseInt(v || "50", 10) || 50)))
+                setLimit(
+                  Math.max(1, Math.min(500, parseInt(v || "50", 10) || 50)),
+                )
               }
               keyboardType="number-pad"
               style={styles.limitInput}
             />
-            <Pressable style={styles.btnSmall} onPress={refreshSelected} disabled={busy}>
+            <Pressable
+              style={styles.btnSmall}
+              onPress={refreshSelected}
+              disabled={busy}
+            >
               <Text style={styles.btnText}>Load</Text>
             </Pressable>
           </View>
 
           <Text style={styles.mono}>
-            {selectedTable ? `Columns: ${tableCols.join(", ") || "—"}` : "No table selected"}
+            {selectedTable
+              ? `Columns: ${tableCols.join(", ") || "—"}`
+              : "No table selected"}
           </Text>
 
           <View style={{ gap: 10, marginTop: 10 }}>
@@ -312,14 +402,21 @@ export default function DevToolsScreen() {
                 <Text style={styles.rowJson}>{prettyRow(r)}</Text>
               </View>
             ))}
-            {!tableRows?.length ? <Text style={styles.note}>No rows (or table not loaded).</Text> : null}
+            {!tableRows?.length ? (
+              <Text style={styles.note}>No rows (or table not loaded).</Text>
+            ) : null}
           </View>
         </View>
 
         {!!exportText && (
           <View style={styles.section}>
             <Text style={styles.h2}>Last export (for copy)</Text>
-            <TextInput value={exportText} editable={false} multiline style={styles.textarea} />
+            <TextInput
+              value={exportText}
+              editable={false}
+              multiline
+              style={styles.textarea}
+            />
           </View>
         )}
       </ScrollView>
@@ -420,5 +517,10 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   rowTitle: { color: "#93c5fd", fontWeight: "800", marginBottom: 6 },
-  rowJson: { color: "#e5e7eb", fontFamily: "monospace", fontSize: 12, lineHeight: 16 },
+  rowJson: {
+    color: "#e5e7eb",
+    fontFamily: "monospace",
+    fontSize: 12,
+    lineHeight: 16,
+  },
 });

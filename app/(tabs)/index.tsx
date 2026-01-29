@@ -1,11 +1,18 @@
 import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { AppHeader } from "../../components/AppHeader";
 import { TileSheet } from "../../components/TileSheet";
 import { RealmMap } from "../../components/realm/RealmMap";
-import { RealmStatsRow } from "../../components/realm/RealmStatsRow";
 import type { Tile } from "../../lib/types";
+import {
+  buildTileIndex,
+  canInvest,
+  investabilityReason,
+  isConquered,
+  isFrontier,
+  isHardLocked,
+} from "../../lib/world/unlockRules";
 import { useGameStore } from "../../store/useGameStore";
 
 export default function RealmScreen() {
@@ -13,19 +20,22 @@ export default function RealmScreen() {
   const init = useGameStore((s) => s.init);
 
   const xp = useGameStore((s) => s.xp);
-  const light = useGameStore((s) => s.light);
+  const craft = useGameStore((s) => s.craft);
+  const lore = useGameStore((s) => s.lore);
+  const vigor = useGameStore((s) => s.vigor);
+  const clarity = useGameStore((s) => s.clarity);
+  const gold = useGameStore((s) => s.gold);
+
   const tiles = useGameStore((s) => s.tiles);
 
   const targetTileId = useGameStore((s) => s.targetTileId);
   const setTargetTile = useGameStore((s) => s.setTargetTile);
-
-  const spendLightBoostTile = useGameStore((s) => s.spendLightBoostTile);
-  const boostCost = useGameStore((s) => s.boostCost);
-  const boostMinutes = useGameStore((s) => s.boostMinutes);
+  const spendResourceOnTile = useGameStore((s) => s.spendResourceOnTile);
 
   useEffect(() => {
     init();
   }, [init]);
+
 
   // bottom sheet state
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -36,15 +46,48 @@ export default function RealmScreen() {
     return tiles.find((t) => t.id === selectedTileId) ?? null;
   }, [tiles, selectedTileId]);
 
+  const tileIndex = useMemo(() => buildTileIndex(tiles as Tile[]), [tiles]);
+
+  const selectedMeta = useMemo(() => {
+    if (!selectedTile)
+      return {
+        canInvest: false,
+        reason: "",
+        statusLabel: "",
+      };
+
+    const hardLocked = isHardLocked(selectedTile);
+    const conquered = isConquered(selectedTile);
+    const frontier = isFrontier(selectedTile, tileIndex);
+    const canSpend = canInvest(selectedTile, tileIndex);
+    const statusLabel = hardLocked
+      ? "Sealed"
+      : conquered
+        ? "Conquered"
+        : frontier
+          ? "Frontier"
+          : "Unreachable";
+    const reason = canSpend ? "" : investabilityReason(selectedTile, tileIndex);
+
+    return { canInvest: canSpend, reason, statusLabel };
+  }, [selectedTile, tileIndex]);
+
   const onTilePress = useCallback((tileId: string) => {
+    // Tap only selects a tile and opens the sheet.
+    // Unlocking happens only when you spend resources.
     setSelectedTileId(tileId);
     setSheetOpen(true);
   }, []);
 
   if (!isReady) {
     return (
-      <View style={[styles.screen, { alignItems: "center", justifyContent: "center" }]}>
-        <Text style={{ color: "#9ca3af", fontWeight: "800" }}>Loading…</Text>
+      <View
+        style={[
+          styles.screen,
+          { alignItems: "center", justifyContent: "center" },
+        ]}
+      >
+        <Text style={{ color: "#9ca3af", fontWeight: "800" }}>Loading...</Text>
       </View>
     );
   }
@@ -53,42 +96,55 @@ export default function RealmScreen() {
     <View style={styles.screen}>
       <AppHeader
         title="Inner Realm"
-        subtitle="Pan • pinch to zoom"
+        subtitle="Realm map"
         right={
           <View style={styles.pill}>
-            <Text style={styles.pillLabel}>Light</Text>
-            <Text style={styles.pillValue}>{light}</Text>
+            <Text style={styles.pillLabel}>XP</Text>
+            <Text style={styles.pillValue}>{xp}</Text>
           </View>
         }
       />
 
       <View style={styles.body}>
-        <RealmStatsRow xp={xp} boostMinutes={boostMinutes} boostCost={boostCost} />
+        <View style={styles.mapArea}>
+          <RealmMap
+            tiles={tiles as Tile[]}
+            targetTileId={targetTileId}
+            onTilePress={onTilePress}
+            fill
+          />
+        </View>
 
-        <Pressable style={styles.primaryBtn} onPress={() => router.push("/log-session")}>
+        <Pressable
+          style={styles.primaryBtn}
+          onPress={() => router.push("/log-session")}
+        >
           <Text style={styles.primaryBtnText}>Log a session</Text>
         </Pressable>
-
-        <Text style={styles.help}>Tap tile → actions. Drag anywhere on the map to pan. Pinch to zoom.</Text>
-
-        <RealmMap tiles={tiles as Tile[]} targetTileId={targetTileId} onTilePress={onTilePress} />
 
         <TileSheet
           open={sheetOpen}
           tile={selectedTile}
-          light={light}
-          boostCost={boostCost}
-          boostMinutes={boostMinutes}
+          craft={craft}
+          lore={lore}
+          vigor={vigor}
+          clarity={clarity}
+          gold={gold}
+          canInvest={selectedMeta.canInvest}
+          reason={selectedMeta.reason}
+          statusLabel={selectedMeta.statusLabel}
           isTarget={!!selectedTile && selectedTile.id === targetTileId}
           onClose={() => setSheetOpen(false)}
-          onBoost={async () => {
+          onSpend={async (resource, minutes) => {
             if (!selectedTile) return;
-            await spendLightBoostTile(selectedTile.id);
-          }}
-          onLogHere={() => {
-            if (!selectedTile) return;
-            setSheetOpen(false);
-            router.push({ pathname: "/log-session", params: { tileId: selectedTile.id } });
+            const res = await spendResourceOnTile(
+              selectedTile.id,
+              resource,
+              minutes,
+            );
+            if (!res.ok) {
+              Alert.alert("Can't invest", res.reason ?? "Unknown reason");
+            }
           }}
           onToggleTarget={async () => {
             if (!selectedTile) return;
@@ -104,7 +160,7 @@ export default function RealmScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#000" },
 
-  body: { flex: 1, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 24 },
+  body: { flex: 1, paddingHorizontal: 20, paddingBottom: 16 },
 
   primaryBtn: {
     marginTop: 14,
@@ -115,7 +171,8 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { color: "#000", fontSize: 16, fontWeight: "900" },
 
-  help: { marginTop: 10, color: "#9ca3af", fontSize: 12, lineHeight: 16 },
+  mapArea: { flex: 1, minHeight: 0 },
+
 
   pill: {
     backgroundColor: "#050608",

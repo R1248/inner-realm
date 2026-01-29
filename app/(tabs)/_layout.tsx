@@ -29,6 +29,24 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="character"
+        options={{
+          title: "Character",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="person-circle-outline" color={color} size={size} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="quests"
+        options={{
+          title: "Quests",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="checkbox-outline" color={color} size={size} />
+          ),
+        }}
+      />
       {__DEV__ && <Tabs.Screen name="devtools" options={{ title: "Dev" }} />}
     </Tabs>
   );

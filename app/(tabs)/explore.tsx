@@ -1,26 +1,43 @@
-import React, { useEffect, useMemo } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+﻿import React, { useEffect, useMemo, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useRouter } from "expo-router";
 import { AppHeader } from "../../components/AppHeader";
-import type { ActivityType, Session } from "../../lib/types";
+import { ProgressChart } from "../../components/ProgressChart";
+import {
+  buildDayAggMap,
+  formatDayLabel,
+  makeLastNDaysKeys,
+  streakForActivity,
+  sumForActivity,
+  trendForActivity,
+  type DayAgg,
+  type DisplayActivity,
+} from "../../lib/progressMetrics";
 import { useGameStore } from "../../store/useGameStore";
 
 const DAYS = 14;
 
 // base RGB per activity (dark-theme friendly)
-const ACTIVITY_RGB: Record<ActivityType, { r: number; g: number; b: number }> = {
+const ACTIVITY_RGB: Record<DisplayActivity, { r: number; g: number; b: number }> = {
   work: { r: 56, g: 189, b: 248 },       // sky
   study: { r: 125, g: 211, b: 252 },     // lighter sky
   meditation: { r: 167, g: 139, b: 250 },// violet
   sport: { r: 245, g: 158, b: 11 },      // amber
-  habit: { r: 251, g: 191, b: 36 },      // lighter amber
 };
 
-const COLS: { key: ActivityType; label: string }[] = [
-  { key: "work", label: "Work" },
-  { key: "study", label: "Study" },
-  { key: "meditation", label: "Medit." },
-  { key: "sport", label: "Sport" },
-  { key: "habit", label: "Habit" },
+const COLS: { key: DisplayActivity; label: string }[] = [
+  { key: "work", label: "🛠️" },
+  { key: "study", label: "📚" },
+  { key: "meditation", label: "🧘" },
+  { key: "sport", label: "🏃" },
+];
+
+const CHART_OPTIONS: { key: DisplayActivity | "total"; label: string }[] = [
+  { key: "total", label: "Total" },
+  { key: "work", label: "🛠️" },
+  { key: "study", label: "📚" },
+  { key: "meditation", label: "🧘" },
+  { key: "sport", label: "🏃" },
 ];
 
 // how many minutes counts as "full intensity" for coloring
@@ -30,98 +47,84 @@ function clamp01(x: number) {
   return Math.max(0, Math.min(1, x));
 }
 
-function rgbaForMinutes(activity: ActivityType, minutes: number) {
+function rgbaForMinutes(activity: DisplayActivity, minutes: number) {
   const { r, g, b } = ACTIVITY_RGB[activity];
   const ratio = clamp01(minutes / CELL_TARGET_MIN);
   const alpha = minutes <= 0 ? 0 : 0.10 + ratio * 0.65; // 0.10..0.75
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-function dayKeyLocal(ts: number) {
-  const d = new Date(ts);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
+const COL_W_DATE = 86;
+const COL_W = 58;
+
+const LEVEL_STEP = 300; // minutes per level
+
+function levelForMinutes(total: number) {
+  const lvl = Math.max(1, Math.floor(total / LEVEL_STEP) + 1);
+  const within = total % LEVEL_STEP;
+  const ratio = within / LEVEL_STEP;
+  return { level: lvl, ratio };
 }
 
-function formatDayLabel(key: string) {
-  // key: YYYY-MM-DD
-  const [y, m, d] = key.split("-").map(Number);
-  const dt = new Date(y, (m ?? 1) - 1, d ?? 1);
-  // simple localized label: "Mon 13/1"
-  const weekday = dt.toLocaleDateString(undefined, { weekday: "short" });
-  return `${weekday} ${d}.${m}.`;
-}
-
-function makeLastNDaysKeys(n: number) {
-  const out: string[] = [];
-  const now = new Date();
-  // today local midnight
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  for (let i = 0; i < n; i++) {
-    const t = base - i * 24 * 60 * 60 * 1000;
-    out.push(dayKeyLocal(t));
-  }
-  return out; // [today..older]
-}
-
-type DayAgg = Record<ActivityType, number> & { total: number };
-
-function emptyAgg(): DayAgg {
-  return { work: 0, study: 0, meditation: 0, sport: 0, habit: 0, total: 0 };
-}
-
-function addSessionToAgg(a: DayAgg, s: Session) {
-  const k = s.activity;
-  const mins = Number(s.minutes) || 0;
-  a[k] += mins;
-  a.total += mins;
+function trendIcon(trend: "up" | "down" | "flat") {
+  if (trend === "up") return "↑";
+  if (trend === "down") return "↓";
+  return "→";
 }
 
 export default function ProgressScreen() {
+  const router = useRouter();
   const isReady = useGameStore((s) => s.isReady);
   const init = useGameStore((s) => s.init);
   const sessions = useGameStore((s) => s.sessions);
 
   useEffect(() => {
-    // safe to call; store will just ensure DB is ready
     init();
   }, [init]);
 
   const dayKeys = useMemo(() => makeLastNDaysKeys(DAYS), []);
 
+  const aggMap = useMemo(() => buildDayAggMap(sessions, dayKeys), [sessions, dayKeys]);
+
   const table = useMemo(() => {
-    // prefill days so you always see last N rows even if no sessions
-    const map = new Map<string, DayAgg>();
-    for (const k of dayKeys) map.set(k, emptyAgg());
+    return dayKeys.map((k) => ({ dayKey: k, agg: aggMap.get(k)! }));
+  }, [aggMap, dayKeys]);
 
-    for (const s of sessions) {
-      const k = dayKeyLocal(s.createdAt);
-      if (!map.has(k)) continue; // ignore older than window
-      const agg = map.get(k)!;
-      addSessionToAgg(agg, s);
-    }
-
-    // keep order: today first
-    return dayKeys.map((k) => ({ dayKey: k, agg: map.get(k)! }));
-  }, [sessions, dayKeys]);
-
-  const today = table[0]?.agg ?? emptyAgg();
+  const today = table[0]?.agg ?? ({ total: 0 } as DayAgg);
   const week = useMemo(() => {
-    const w = emptyAgg();
-    for (let i = 0; i < Math.min(7, table.length); i++) {
-      const a = table[i].agg;
-      for (const c of COLS) w[c.key] += a[c.key];
-      w.total += a.total;
-    }
-    return w;
-  }, [table]);
+    const total = sumForActivity(aggMap, dayKeys.slice(0, 7), "total");
+    return { total };
+  }, [aggMap, dayKeys]);
+
+  const areas = useMemo(() => {
+    return COLS.map((c) => {
+      const total = sumForActivity(aggMap, dayKeys, c.key);
+      const { level, ratio } = levelForMinutes(total);
+      const streak = streakForActivity(aggMap, dayKeys, c.key);
+      const trend = trendForActivity(aggMap, dayKeys, c.key);
+      return { key: c.key, label: c.label, total, level, ratio, streak, trend };
+    });
+  }, [aggMap, dayKeys]);
+
+  const [chartKey, setChartKey] = useState<DisplayActivity | "total">("total");
+
+  const chartDays = useMemo(() => [...dayKeys].reverse(), [dayKeys]);
+  const chartValues = useMemo(() => {
+    return chartDays.map((k) => {
+      const agg = aggMap.get(k);
+      if (!agg) return 0;
+      return chartKey === "total" ? agg.total : agg[chartKey];
+    });
+  }, [aggMap, chartDays, chartKey]);
+
+  const chartColor = chartKey === "total"
+    ? "rgba(255,255,255,0.7)"
+    : `rgb(${ACTIVITY_RGB[chartKey].r},${ACTIVITY_RGB[chartKey].g},${ACTIVITY_RGB[chartKey].b})`;
 
   if (!isReady) {
     return (
       <View style={[styles.screen, { alignItems: "center", justifyContent: "center" }]}>
-        <Text style={{ color: "#9ca3af", fontWeight: "800" }}>Loading…</Text>
+        <Text style={{ color: "#9ca3af", fontWeight: "800" }}>Loading...</Text>
       </View>
     );
   }
@@ -147,6 +150,56 @@ export default function ProgressScreen() {
             <Text style={styles.cardValue}>{week.total} min</Text>
             <Text style={styles.cardHint}>Sessions only (no boosts)</Text>
           </View>
+        </View>
+
+        <Text style={styles.sectionTitle}>Oblasti rozvoje</Text>
+        <View style={styles.areaGrid}>
+          {areas.map((a) => (
+            <Pressable
+              key={a.key}
+              style={styles.areaCard}
+              onPress={() => router.push(`/area/${a.key}`)}
+            >
+              <View style={styles.areaHeader}>
+                <Text style={styles.areaTitle}>{a.label}</Text>
+                <View style={styles.levelChip}>
+                  <Text style={styles.levelText}>Lv {a.level}</Text>
+                </View>
+              </View>
+
+              <View style={styles.areaBarTrack}>
+                <View style={[styles.areaBarFill, { width: `${Math.round(a.ratio * 100)}%` }]} />
+              </View>
+
+              <View style={styles.areaFooter}>
+                <View style={styles.streakChip}>
+                  <Text style={styles.streakText}>Streak {a.streak}d</Text>
+                </View>
+                <Text style={styles.trend}>{trendIcon(a.trend)}</Text>
+              </View>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={[styles.sectionTitle, { marginTop: 18 }]}>Graf 14 dnů</Text>
+        <View style={styles.chartCard}>
+          <View style={styles.chipsRow}>
+            {CHART_OPTIONS.map((opt) => {
+              const isOn = opt.key === chartKey;
+              return (
+                <Pressable
+                  key={String(opt.key)}
+                  onPress={() => setChartKey(opt.key)}
+                  style={[styles.chip, isOn ? styles.chipOn : styles.chipOff]}
+                >
+                  <Text style={[styles.chipText, isOn ? styles.chipTextOn : styles.chipTextOff]}>
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <ProgressChart values={chartValues} barColor={chartColor} height={120} />
         </View>
 
         <View style={styles.legend}>
@@ -218,9 +271,6 @@ export default function ProgressScreen() {
   );
 }
 
-const COL_W_DATE = 110;
-const COL_W = 76;
-
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#000" },
 
@@ -237,6 +287,65 @@ const styles = StyleSheet.create({
   cardLabel: { color: "#9ca3af", fontSize: 12 },
   cardValue: { color: "white", fontSize: 22, fontWeight: "900", marginTop: 6 },
   cardHint: { color: "#6b7280", fontSize: 12, marginTop: 4 },
+
+  sectionTitle: { marginTop: 18, color: "#e5e7eb", fontSize: 12, fontWeight: "900" },
+
+  areaGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12, marginTop: 10 },
+  areaCard: {
+    width: "48%",
+    backgroundColor: "#050608",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 12,
+  },
+  areaHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  areaTitle: { color: "white", fontSize: 16, fontWeight: "900" },
+  levelChip: {
+    backgroundColor: "#020305",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  levelText: { color: "#e5e7eb", fontSize: 11, fontWeight: "800" },
+  areaBarTrack: {
+    marginTop: 10,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
+  },
+  areaBarFill: { height: "100%", borderRadius: 999, backgroundColor: "rgba(255,255,255,0.8)" },
+  areaFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 10 },
+  streakChip: {
+    backgroundColor: "#020305",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  streakText: { color: "#9ca3af", fontSize: 10, fontWeight: "800" },
+  trend: { color: "#e5e7eb", fontSize: 14, fontWeight: "900" },
+
+  chartCard: {
+    marginTop: 10,
+    backgroundColor: "#050608",
+    borderColor: "#111827",
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 12,
+  },
+
+  chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 10 },
+  chip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
+  chipOn: { backgroundColor: "#fff", borderColor: "#fff" },
+  chipOff: { backgroundColor: "#020305", borderColor: "#111827" },
+  chipText: { fontWeight: "800", fontSize: 11 },
+  chipTextOn: { color: "#000" },
+  chipTextOff: { color: "#e5e7eb" },
 
   legend: {
     flexDirection: "row",

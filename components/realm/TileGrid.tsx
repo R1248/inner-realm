@@ -3,6 +3,20 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { Tile } from "../../lib/types";
 import { MAX_LEVEL, levelBg, regionColors, tileProgressRatio } from "./tileUi";
 
+function brightenHex(hex: string, amount = 0.35): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  if (!m) return hex;
+  const num = parseInt(m[1], 16);
+  const r = (num >> 16) & 0xff;
+  const g = (num >> 8) & 0xff;
+  const b = num & 0xff;
+  const mix = (c: number) => Math.min(255, Math.round(c + (255 - c) * amount));
+  const nr = mix(r);
+  const ng = mix(g);
+  const nb = mix(b);
+  return `#${((nr << 16) | (ng << 8) | nb).toString(16).padStart(6, "0")}`;
+}
+
 /**
  * Heavy grid isolated from pan/zoom updates.
  * IMPORTANT: This component must NOT receive tx/ty/scale in props.
@@ -11,17 +25,39 @@ export const TileGrid = React.memo(function TileGrid(props: {
   rows: number;
   cols: number;
   tileMap: Map<string, Tile>;
+  /** Tiles you can currently invest into (conquered + frontier). */
+  investableTileIds?: ReadonlySet<string>;
+  /** Frontier tiles: investable AND still level 0. */
+  frontierTileIds?: ReadonlySet<string>;
+  hardLockedTileIds?: ReadonlySet<string>;
   tileSize: number;
   gap: number;
   targetTileId: string | null;
   onTilePress: (tileId: string) => void;
 }) {
-  const { rows, cols, tileMap, tileSize, gap, targetTileId, onTilePress } = props;
+  const {
+    rows,
+    cols,
+    tileMap,
+    investableTileIds,
+    frontierTileIds,
+    hardLockedTileIds,
+    tileSize,
+    gap,
+    targetTileId,
+    onTilePress,
+  } = props;
 
   return (
     <>
       {Array.from({ length: rows }).map((_, r) => (
-        <View key={r} style={{ flexDirection: "row", marginBottom: r === rows - 1 ? 0 : gap }}>
+        <View
+          key={r}
+          style={{
+            flexDirection: "row",
+            marginBottom: r === rows - 1 ? 0 : gap,
+          }}
+        >
           {Array.from({ length: cols }).map((_, c) => {
             const t = tileMap.get(`${r}-${c}`);
             if (!t) {
@@ -39,7 +75,11 @@ export const TileGrid = React.memo(function TileGrid(props: {
 
             const { border, fill } = regionColors(t.region);
             const isTarget = t.id === targetTileId;
-            const isLocked = t.locked === 1;
+            const isHardLocked = hardLockedTileIds?.has(t.id) ?? false;
+            const isInvestable = investableTileIds?.has(t.id) ?? false;
+            const isFrontier = frontierTileIds?.has(t.id) ?? false;
+            const isUnreachable = !isHardLocked && !isInvestable;
+            const frontierBorder = brightenHex(fill || border, 0.4);
 
             const level = Math.max(0, Math.min(MAX_LEVEL, t.level));
             const ratio = tileProgressRatio(t);
@@ -54,23 +94,37 @@ export const TileGrid = React.memo(function TileGrid(props: {
                     width: tileSize,
                     height: tileSize,
                     marginRight: c === cols - 1 ? 0 : gap,
-                    borderColor: isLocked ? "#374151" : border,
-                    backgroundColor: levelBg(t.region, t.level),
-                    borderWidth: isTarget ? 2 : 1,
-                    opacity: isLocked ? 0.35 : 1,
+                    borderColor: isHardLocked
+                      ? "#111827"
+                      : isFrontier
+                        ? frontierBorder
+                        : border,
+                    backgroundColor: isHardLocked
+                      ? "#020305"
+                      : levelBg(t.region, t.level),
+                    borderWidth: isTarget || isFrontier ? 2 : 1,
+                    opacity: isHardLocked ? 0.25 : isUnreachable ? 0.35 : 1,
                   },
                 ]}
               >
                 {isTarget ? <View style={styles.targetDot} /> : null}
-                {isLocked ? <Text style={styles.lockText}>🔒</Text> : null}
+                {isHardLocked ? <Text style={styles.lockText}>LOCK</Text> : null}
+                {isFrontier ? <Text style={styles.frontierText}>FRONT</Text> : null}
 
-                {level > 0 ? <Text style={styles.tileText}>{level}</Text> : <View style={styles.tileDot} />}
+                {level > 0 ? (
+                  <Text style={styles.tileText}>{level}</Text>
+                ) : (
+                  <View style={styles.tileDot} />
+                )}
 
                 <View style={styles.tileBarTrack}>
                   <View
                     style={[
                       styles.tileBarFill,
-                      { width: `${Math.round(ratio * 100)}%`, backgroundColor: fill },
+                      {
+                        width: `${Math.round(ratio * 100)}%`,
+                        backgroundColor: fill,
+                      },
                     ]}
                   />
                 </View>
@@ -112,6 +166,14 @@ const styles = StyleSheet.create({
     opacity: 0.95,
   },
 
+  frontierText: {
+    position: "absolute",
+    top: 4,
+    left: 6,
+    fontSize: 11,
+    opacity: 0.95,
+  },
+
   tileBarTrack: {
     position: "absolute",
     left: 6,
@@ -127,3 +189,4 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 });
+
